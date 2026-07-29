@@ -2,6 +2,10 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import re
+import urllib.request
+import urllib.parse
+import json
+import time
 
 # Set page configuration
 st.set_page_config(page_title="Ops Manager Dashboard", layout="wide")
@@ -30,39 +34,37 @@ def sanitize_numeric_series(series):
     return pd.to_numeric(cleaned, errors='coerce').fillna(0.0)
 
 # ---------------------------------------------------------
-# HIGH-FIDELITY LOCAL GEOGRAPHIC SEED DICTIONARY
+# HIGH-PERFORMANCE CACHED GEOCODING UTILITY
 # ---------------------------------------------------------
-AZ_ZIP_COORDINATES = {
-    '85258': (33.5634, -111.8927), # Scottsdale
-    '85750': (32.2980, -110.8449), # Tucson
-    '86426': (35.0134, -114.5497), # Fort Mohave
-    '85286': (33.2715, -111.8316), # Chandler/Gilbert
-    '85251': (33.4936, -111.9167), # Scottsdale
-    '85741': (32.3472, -111.0419), # Tucson
-    '85745': (32.2434, -111.0179), # Tucson
-    '85138': (33.0073, -111.9324), # Maricopa
-    '85143': (33.1911, -111.5280), # San Tan Valley
-    '85308': (33.6539, -112.1694), # Glendale
-    '85142': (33.2487, -111.6343), # Queen Creek
-    '85204': (33.3992, -111.7896), # Mesa
-    '85042': (33.3794, -112.0283), # Phoenix
-    '85326': (33.3519, -112.5908), # Buckeye
-    '85335': (33.6082, -112.3241), # El Mirage
-    '85224': (33.3301, -111.8632), # Chandler
-    '85297': (33.2781, -111.7096), # Gilbert
-    '85044': (33.3291, -111.9943), # Phoenix
-    '85736': (31.9011, -111.3702), # Tucson
-}
-
-@st.cache_data(ttl=86400)
-def fetch_extended_zip_database():
-    """Downloads a public, lightweight US zip code map lookup as a fallback network option."""
+@st.cache_data(ttl=604800, show_spinner=False)
+def geocode_address_string(address_str):
+    """
+    Converts a full job street address string into exact Lat/Lon coordinates 
+    using the open-source Nominatim engine with structured error safety.
+    """
+    if not address_str or len(str(address_str).strip()) < 6:
+        return None
+    
+    # Append state constraint if not explicitly written to ground local coordinate queries
+    query_string = str(address_str).strip()
+    if not any(state in query_string.upper() for state in [', AZ', ' ARIZONA']):
+        query_string += ", AZ"
+        
+    encoded_query = urllib.parse.quote(query_string)
+    url = f"https://nominatim.openstreetmap.org/search?q={encoded_query}&format=json&limit=1"
+    
     try:
-        url = "https://raw.githubusercontent.com/jefftune/US-Zip-Codes-with-Lat-And-Long/master/US%20Zip%20Codes%20from%202013%20Government%20Data.txt"
-        df = pd.read_csv(url, sep=',', dtype={'ZIP': str})
-        return df.set_index('ZIP')[['LAT', 'LNG']].to_dict('index')
-    except:
-        return {}
+        req = urllib.request.Request(
+            url, 
+            headers={'User-Agent': 'OpsManagerDashboard_ProductionEngine/2.0 (operations@opsmanager.internal)'}
+        )
+        with urllib.request.urlopen(req, timeout=4) as response:
+            data = json.loads(response.read().decode())
+            if data:
+                return float(data[0]['lat']), float(data[0]['lon'])
+    except Exception:
+        pass
+    return None
 
 # ---------------------------------------------------------
 # RESILIENT AUTOMATIC COLUMN SCANNING ENGINE
@@ -90,7 +92,7 @@ def auto_map_column(keys, columns, exclude_keys=None):
 # DYNAMIC ON-TICKET TIME CALCULATOR ENGINE
 # ---------------------------------------------------------
 def compute_custom_ticket_hours(row, cols):
-    """Calculates ticket duration based on workflow status timestamps."""
+    """Calculates ticket duration based on workflow status milestones."""
     start_times = []
     end_times = []
     
@@ -296,6 +298,7 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
     mapped_tags = auto_map_column(['tags', 'label', 'work type'], job_cols_list)
     mapped_status = auto_map_column(['status', 'job status', 'state'], job_cols_list)
     mapped_zip = auto_map_column(['zip code', 'zip', 'postal'], job_cols_list)
+    mapped_address = auto_map_column(['street address', 'address', 'full address', 'job address', 'location', 'site address'], job_cols_list)
     mapped_rel_inv = auto_map_column(['related invoices', 'invoice id', 'related invoice', 'invoice #'], job_cols_list)
     mapped_id = auto_map_column(['#id', 'job id', 'ticket number', 'id', 'wo #'], job_cols_list)
 
@@ -313,6 +316,7 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
     jobs_df_clean['Tags'] = raw_jobs_df[mapped_tags].fillna('').astype(str) if mapped_tags else ''
     jobs_df_clean['Status'] = raw_jobs_df[mapped_status].fillna('').astype(str) if mapped_status else ''
     jobs_df_clean['Zip Code'] = raw_jobs_df[mapped_zip].fillna('').astype(str) if mapped_zip else ''
+    jobs_df_clean['Full Address'] = raw_jobs_df[mapped_address].fillna('').astype(str) if mapped_address else ''
     jobs_df_clean['Related Invoices'] = raw_jobs_df[mapped_rel_inv].fillna('').astype(str) if mapped_rel_inv else ''
     jobs_df_clean['#ID'] = raw_jobs_df[mapped_id].fillna('').astype(str) if mapped_id else raw_jobs_df.index.astype(str)
 
@@ -619,7 +623,7 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
             st.warning("No completed financial data available to build margins.")
 
     # ---------------------------------------------------------
-    # TAB 3: Geographic Performance (WITH INTERACTIVE MAP LAYER)
+    # TAB 3: Geographic Performance (FULL STREET ADDRESS LAYER)
     # ---------------------------------------------------------
     with tab3:
         st.header("Geographic Profitability & Travel Time Analysis")
@@ -634,42 +638,68 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
         if 'Assigned Team Members' in geo_df.columns:
             geo_df = geo_df.dropna(subset=['Assigned Team Members'])
 
-        if 'Zip Code' in geo_df.columns:
-            geo_df['Zip Code'] = geo_df['Zip Code'].astype(str).str.strip().str.replace(r'\.0$', '', regex=True)
-            geo_df = geo_df[(geo_df['Zip Code'] != 'nan') & (geo_df['Zip Code'] != '') & (geo_df['Zip Code'] != 'None')]
+        if 'Full Address' in geo_df.columns:
+            geo_df['Full Address'] = geo_df['Full Address'].astype(str).str.strip()
+            geo_df = geo_df[(geo_df['Full Address'] != '') & (geo_df['Full Address'].str.lower() != 'nan')]
+
+        if 'Full Address' in geo_df.columns and not geo_df.empty:
             
-        if 'Zip Code' in geo_df.columns and not geo_df.empty:
+            st.subheader("🗺️ Exact Location Revenue Heatmap")
+            st.write("Pins represent individual properties. **Bubble sizes scale proportionally** relative to job transaction volume.")
             
-            # --- MAP VISUALIZATION LAYER ---
-            st.subheader("🗺️ Operational Area Heatmap")
-            st.write("Visual distribution of service tickets. Highlights concentration zones across your operating region.")
+            # Extract unique address strings to optimize batch execution loops
+            unique_addresses = [a for a in geo_df['Full Address'].unique() if len(str(a).strip()) > 5]
             
-            extended_db = fetch_extended_zip_database()
-            
-            map_records = []
-            for _, row in geo_df.iterrows():
-                z_code = str(row['Zip Code']).strip().zfill(5)
-                if z_code in AZ_ZIP_COORDINATES:
-                    lat, lon = AZ_ZIP_COORDINATES[z_code]
-                elif z_code in extended_db:
-                    try:
-                        lat = float(extended_db[z_code]['LAT'])
-                        lon = float(extended_db[z_code]['LNG'])
-                    except:
-                        continue
-                else:
-                    continue
-                map_records.append({'lat': lat, 'lon': lon})
+            if unique_addresses:
+                address_coordinate_lookup = {}
                 
-            if map_records:
-                map_df = pd.DataFrame(map_records).dropna()
-                st.map(map_df)
+                # Setup Streamlit UI progress track for structural transparency during first run execution
+                progress_text = "Resolving exact properties... mapping locations."
+                geo_bar = st.progress(0.0, text=progress_text)
+                
+                for index, addr in enumerate(unique_addresses):
+                    coords = geocode_address_string(addr)
+                    if coords:
+                        address_coordinate_lookup[addr] = coords
+                    
+                    # Comply gracefully with Nominatim rate requirements during first-time database builds
+                    # (Cached items execute instantly with zero sleep delay penalty)
+                    if index % 3 == 0:
+                        time.sleep(0.1)
+                        
+                    fraction = (index + 1) / len(unique_addresses)
+                    geo_bar.progress(fraction, text=f"Processing property {index + 1} of {len(unique_addresses)}")
+                
+                geo_bar.empty()
+                
+                # Apply localized coordinates dictionary map back to main data frame rows
+                geo_df['latitude'] = geo_df['Full Address'].map(lambda x: address_coordinate_lookup.get(x, (None, None))[0])
+                geo_df['longitude'] = geo_df['Full Address'].map(lambda x: address_coordinate_lookup.get(x, (None, None))[1])
+                
+                map_render_df = geo_df.dropna(subset=['latitude', 'longitude']).copy()
+                
+                if not map_render_df.empty:
+                    # Configure bubbles to expand linearly based on ticket financial value weights
+                    base_radius = 25.0
+                    max_rev_found = map_render_df['Total Invoice Amount'].max()
+                    if max_rev_found <= 0: max_rev_found = 1.0
+                    
+                    map_render_df['bubble_size'] = base_radius + (map_render_df['Total Invoice Amount'] / max_rev_found) * 200.0
+                    
+                    # Display native visual maps
+                    st.map(map_render_df, latitude='latitude', longitude='longitude', size='bubble_size')
+                else:
+                    st.warning("Could not match addresses to exact GPS vectors. Verify address strings contain street numbers.")
             else:
-                st.warning("Coordinates could not be located for the parsed zip codes. Map layer skipped.")
+                st.info("No addresses found within the current dataset configuration fields.")
                 
             st.markdown("---")
             
             # --- METRICS TABLES ---
+            if 'Zip Code' in geo_df.columns:
+                geo_df['Zip Code'] = geo_df['Zip Code'].astype(str).str.strip().str.replace(r'\.0$', '', regex=True)
+                geo_df = geo_df[(geo_df['Zip Code'] != 'nan') & (geo_df['Zip Code'] != '') & (geo_df['Zip Code'] != 'None')]
+            
             col3, col4 = st.columns(2)
             with col3:
                 st.subheader("💰 Most Lucrative Zip Codes (Net Profit)")
@@ -696,6 +726,6 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
                 else:
                     st.info("Travel tracking duration columns are missing or empty in this dataset upload window.")
         else:
-            st.info("ℹ️ No active geographical location records or valid Zip Codes detected within this file range to map performance details.")
+            st.info("ℹ️ No active geographical location records or valid address data columns detected within this file range to map performance details.")
 else:
     st.info("👋 Welcome! Please upload **all three** operational CSV exports in the sidebar to build your data tables.")
