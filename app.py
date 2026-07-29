@@ -6,6 +6,7 @@ import urllib.request
 import urllib.parse
 import json
 import time
+import pydeck as pdk
 
 # Set page configuration
 st.set_page_config(page_title="Ops Manager Dashboard", layout="wide")
@@ -45,7 +46,6 @@ def geocode_address_string(address_str):
     if not address_str or len(str(address_str).strip()) < 6:
         return None
     
-    # Append state constraint if not explicitly written to ground local coordinate queries
     query_string = str(address_str).strip()
     if not any(state in query_string.upper() for state in [', AZ', ' ARIZONA']):
         query_string += ", AZ"
@@ -250,7 +250,6 @@ timesheets_df = process_uploaded_file(uploaded_timesheets, shifted_header=False)
 # ---------------------------------------------------------
 if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not None:
     
-    # --- AUTOMATED HEADER DEDUPLICATION UTILITY ---
     def sanitize_and_deduplicate_headers(df):
         seen = {}
         new_columns = []
@@ -302,7 +301,6 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
     mapped_rel_inv = auto_map_column(['related invoices', 'invoice id', 'related invoice', 'invoice #'], job_cols_list)
     mapped_id = auto_map_column(['#id', 'job id', 'ticket number', 'id', 'wo #'], job_cols_list)
 
-    # Standardize data structures to run with expected downstream variable structures
     jobs_df_clean = pd.DataFrame()
     jobs_df_clean['Business Unit'] = raw_jobs_df[mapped_bu].fillna('General').astype(str) if mapped_bu else 'General'
     jobs_df_clean['Assigned Team Members'] = raw_jobs_df[mapped_tech].fillna('Unknown Tech').astype(str) if mapped_tech else 'Unknown Tech'
@@ -320,15 +318,11 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
     jobs_df_clean['Related Invoices'] = raw_jobs_df[mapped_rel_inv].fillna('').astype(str) if mapped_rel_inv else ''
     jobs_df_clean['#ID'] = raw_jobs_df[mapped_id].fillna('').astype(str) if mapped_id else raw_jobs_df.index.astype(str)
 
-    # Re-apply tracking columns dynamically for custom timestamp lookups
     for col in raw_jobs_df.columns:
         if 'timestamp' in str(col).lower():
             jobs_df_clean[col] = raw_jobs_df[col]
 
-    # Filter for active target business units
     jobs_df = jobs_df_clean[jobs_df_clean['Business Unit'].str.contains('Water Heaters|Simple Installs', case=False, na=False)].copy()
-
-    # Split multi-tech entries to primary tech
     jobs_df['Assigned Team Members'] = jobs_df['Assigned Team Members'].astype(str).str.split(',').str[0].str.strip()
     jobs_df['Assigned Team Members'] = jobs_df['Assigned Team Members'].replace(['nan', 'None', ''], None)
 
@@ -348,22 +342,16 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
     else:
         invoices_df['Profit Margin'] = 0.0
 
-    # Calculate dynamic scope window from timesheet dates
     valid_ts_dates = timesheets_df['Work Date'].dropna()
     if not valid_ts_dates.empty:
         days_span = (max(valid_ts_dates) - min(valid_ts_dates)).days + 1
-        if days_span in [5, 6]:
-            total_weeks = 1.0
-        else:
-            total_weeks = max(1, days_span) / 7.0
+        total_weeks = 1.0 if days_span in [5, 6] else max(1, days_span) / 7.0
     else:
         days_span = 7
         total_weeks = 1.0
 
     jobs_df['Labor Cost'] = jobs_df.apply(calculate_job_labor_cost, axis=1)
     jobs_df['Material Cost'] = jobs_df.apply(calculate_job_material_cost, axis=1)
-    
-    # Calculate initial job level Net Profit using base job labor rules
     jobs_df['Net Gross Profit'] = jobs_df['Total Invoice Amount'] - jobs_df['Material Cost'] - jobs_df['Labor Cost']
 
     tab1, tab2, tab3 = st.tabs(["Technician & Job Metrics", "Financial & Labor ROI", "Geographic Performance"])
@@ -380,10 +368,8 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
             with col1:
                 st.subheader("📋 Volume & Speed by Technician")
                 tech_metrics = completed_jobs.groupby('Assigned Team Members').agg(
-                    Total_Jobs_Completed=('Status', 'count'),
-                    Avg_Duration_Hours=('Custom Ticket Hours', 'mean'),
-                    Total_Revenue_Generated=('Total Invoice Amount', 'sum'),
-                    Avg_Revenue_Per_Job=('Total Invoice Amount', 'mean')
+                    Total_Jobs_Completed=('Status', 'count'), Avg_Duration_Hours=('Custom Ticket Hours', 'mean'),
+                    Total_Revenue_Generated=('Total Invoice Amount', 'sum'), Avg_Revenue_Per_Job=('Total Invoice Amount', 'mean')
                 ).reset_index().sort_values('Total_Jobs_Completed', ascending=False)
                 
                 tech_metrics.columns = ['Name', 'Jobs Completed', 'Avg Job Time (H:MM)', 'Total Revenue', 'Avg Revenue/Job']
@@ -394,10 +380,8 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
             with col2:
                 st.subheader("🔧 Performance Breakdown by Job Type")
                 job_mix = completed_jobs.groupby('Title').agg(
-                    Job_Count=('Title', 'count'),
-                    Avg_Duration_Hours=('Custom Ticket Hours', 'mean'),
-                    Avg_Revenue_Per_Job=('Total Invoice Amount', 'mean'),
-                    Total_Revenue=('Total Invoice Amount', 'sum')
+                    Job_Count=('Title', 'count'), Avg_Duration_Hours=('Custom Ticket Hours', 'mean'),
+                    Avg_Revenue_Per_Job=('Total Invoice Amount', 'mean'), Total_Revenue=('Total Invoice Amount', 'sum')
                 ).reset_index().sort_values('Job_Count', ascending=False)
                 
                 job_mix.columns = ['Job Title / Type', 'Volume Done', 'Avg Time Spent (H:MM)', 'Avg Ticket Size', 'Total Revenue']
@@ -406,10 +390,7 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
                 }), use_container_width=True, hide_index=True)
             
             st.write("---")
-            
-            # AGGREGATE AUDITING LOG (SORTED BY PAYROLL SLIPPAGE)
             st.subheader("⏰ Clock Hours vs. Ticket Hours Auditing Log (Aggregate Summary)")
-            st.write("Exposes team leaks by contrasting total clocked hours against active job tracking. **Sorted by highest financial payroll slippage**.")
             
             ts_totals_audit = timesheets_df.groupby('User')['Duration Decimal'].sum().reset_index()
             all_unique_techs = completed_jobs['Assigned Team Members'].unique()
@@ -420,46 +401,33 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
                 ts_match = ts_totals_audit[ts_totals_audit['User'] == tech]
                 ts_hours = ts_match['Duration Decimal'].values[0] if not ts_match.empty else 0.0
                 unallocated = max(0.0, ts_hours - j_hours)
-                
                 is_hourly = tech in ['Matt Schlosser', 'Tanner LaForge', 'Edward Lopez']
                 waste_cost = unallocated * 25.00 if is_hourly else 0.0
                 
                 utilization_records.append({
-                    'Tech Name': tech,
-                    'Paid Clock Hours (Timesheets)': ts_hours,
-                    'On-Ticket Hours (Parsed)': j_hours,
-                    'Unallocated Variance (Hours)': unallocated,
-                    'Hourly Payroll Slippage': waste_cost if is_hourly else np.nan
+                    'Tech Name': tech, 'Paid Clock Hours (Timesheets)': ts_hours, 'On-Ticket Hours (Parsed)': j_hours,
+                    'Unallocated Variance (Hours)': unallocated, 'Hourly Payroll Slippage': waste_cost if is_hourly else np.nan
                 })
                 
             utilization_df = pd.DataFrame(utilization_records).sort_values(by='Hourly Payroll Slippage', ascending=False, na_position='last')
-            
             st.dataframe(utilization_df.style.format({
                 'Paid Clock Hours (Timesheets)': '{:.2f} hrs', 'On-Ticket Hours (Parsed)': '{:.2f} hrs',
                 'Unallocated Variance (Hours)': '{:.2f} hrs', 'Hourly Payroll Slippage': '${:,.2f}'
             }, na_rep='-'), use_container_width=True, hide_index=True)
 
             st.write("---")
-
-            # DAILY DEEP DIVE FOR HOURLY TECHS
             st.subheader("🔍 Daily Slippage Deep Dive (Hourly Crew)")
-            st.write("Identifies explicit dates where hourly field personnel experienced substantial time leaks between active job statuses and paid clock time.")
             
             ts_daily = timesheets_df.groupby(['User', 'Work Date'])['Duration Decimal'].sum().reset_index()
             jobs_daily = completed_jobs.groupby(['Assigned Team Members', 'Work Date'])['Custom Ticket Hours'].sum().reset_index()
-            
             daily_merged = pd.merge(ts_daily, jobs_daily, left_on=['User', 'Work Date'], right_on=['Assigned Team Members', 'Work Date'], how='outer')
             hourly_techs_list = ['Matt Schlosser', 'Tanner LaForge', 'Edward Lopez']
-            
-            daily_filtered = daily_merged[
-                (daily_merged['User'].isin(hourly_techs_list)) | (daily_merged['Assigned Team Members'].isin(hourly_techs_list))
-            ].copy().fillna(0)
+            daily_filtered = daily_merged[(daily_merged['User'].isin(hourly_techs_list)) | (daily_merged['Assigned Team Members'].isin(hourly_techs_list))].copy().fillna(0)
             
             if not daily_filtered.empty:
                 daily_filtered['User'] = np.where(daily_filtered['User'] == 0, daily_filtered['Assigned Team Members'], daily_filtered['User'])
                 daily_filtered['Variance Hours'] = daily_filtered['Duration Decimal'] - daily_filtered['Custom Ticket Hours']
                 daily_filtered['Slippage Cost'] = daily_filtered['Variance Hours'] * 25.00
-                
                 daily_filtered = daily_filtered.sort_values(by='Variance Hours', ascending=False)
                 daily_display = daily_filtered[['User', 'Work Date', 'Duration Decimal', 'Custom Ticket Hours', 'Variance Hours', 'Slippage Cost']].copy()
                 daily_display.columns = ['Technician Name', 'Calendar Date', 'Paid Clocked Hours', 'Logged Wrench Hours', 'Unallocated Variance', 'Daily Payroll Loss']
@@ -468,8 +436,6 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
                     'Paid Clocked Hours': '{:.2f} hrs', 'Logged Wrench Hours': '{:.2f} hrs',
                     'Unallocated Variance': '{:.2f} hrs', 'Daily Payroll Loss': '${:,.2f}'
                 }), use_container_width=True, hide_index=True)
-            else:
-                st.info("No daily tracking entries detected for hourly staff within this upload range.")
         else:
             st.warning("No 'Completed' status jobs found.")
 
@@ -478,15 +444,13 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
     # ---------------------------------------------------------
     with tab2:
         st.header("Financial Performance & Labor Cost Analysis")
-        st.info(f"📅 **Dataset Scope Auto-Detected:** The uploaded logs span **{days_span} calendar days** ({total_weeks:.2f} weeks). Salaried overhead is computed using **{total_weeks:.2f} weeks of full salary burden** (Sean Marble: ${70000/52*total_weeks:,.2f}, Mathew Hodges: ${65000/52*total_weeks:,.2f}) to match this specific tracking window.")
+        st.info(f"📅 **Dataset Scope Auto-Detected:** The uploaded logs span **{days_span} calendar days** ({total_weeks:.2f} weeks).")
         
         if not completed_jobs.empty:
             st.subheader("📊 Aggregate Team Efficiency")
             fin_metrics = completed_jobs.groupby('Assigned Team Members').agg(
-                Jobs_Completed=('Status', 'count'),
-                Total_Revenue=('Total Invoice Amount', 'sum'),
-                Total_Material_Cost=('Material Cost', 'sum'),
-                Total_Labor_Cost_Jobs=('Labor Cost', 'sum')
+                Jobs_Completed=('Status', 'count'), Total_Revenue=('Total Invoice Amount', 'sum'),
+                Total_Material_Cost=('Material Cost', 'sum'), Total_Labor_Cost_Jobs=('Labor Cost', 'sum')
             ).reset_index()
             
             ts_totals_finance = timesheets_df.groupby('User')['Duration Decimal'].sum().reset_index()
@@ -496,26 +460,18 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
                 tech = row['Assigned Team Members']
                 if tech in hourly_techs_list:
                     match = ts_totals_finance[ts_totals_finance['User'] == tech]
-                    if not match.empty:
-                        return match['Duration Decimal'].values[0] * 25.00
-                    return 0.0
-                elif tech == 'Sean Marble':
-                    return total_weeks * (70000 / 52)
-                elif tech == 'Mathew Hodges':
-                    return total_weeks * (65000 / 52)
+                    return match['Duration Decimal'].values[0] * 25.00 if not match.empty else 0.0
+                elif tech == 'Sean Marble': return total_weeks * (70000 / 52)
+                elif tech == 'Mathew Hodges': return total_weeks * (65000 / 52)
                 return row['Total_Labor_Cost_Jobs']
             
             fin_metrics['Labor Cost Burden'] = fin_metrics.apply(determine_true_labor, axis=1)
-            
-            # Recompute accurate final net margins based on scaled salary overhead blocks
             fin_metrics['Net Gross Profit'] = fin_metrics['Total_Revenue'] - fin_metrics['Total_Material_Cost'] - fin_metrics['Labor Cost Burden']
-            
             revenue_minus_materials = fin_metrics['Total_Revenue'] - fin_metrics['Total_Material_Cost']
             fin_metrics['Labor % of Rev Less Mats'] = (fin_metrics['Labor Cost Burden'] / revenue_minus_materials) * 100
             fin_metrics['Labor % of Rev Less Mats'] = fin_metrics['Labor % of Rev Less Mats'].replace([np.inf, -np.inf], np.nan).fillna(0.0)
             
-            fin_metrics_display = fin_metrics[['Assigned Team Members', 'Jobs_Completed', 'Total_Revenue', 'Total_Material_Cost', 'Labor Cost Burden', 'Net Gross Profit', 'Labor % of Rev Less Mats']].copy()
-            fin_metrics_display = fin_metrics_display.sort_values(by='Net Gross Profit', ascending=False)
+            fin_metrics_display = fin_metrics[['Assigned Team Members', 'Jobs_Completed', 'Total_Revenue', 'Total_Material_Cost', 'Labor Cost Burden', 'Net Gross Profit', 'Labor % of Rev Less Mats']].copy().sort_values(by='Net Gross Profit', ascending=False)
             fin_metrics_display.columns = ['Name', 'Jobs Done', 'Gross Revenue', 'Material Costs', 'Labor Cost Burden', 'Net Gross Profit', 'Labor % of (Rev - Mats)']
             
             st.dataframe(fin_metrics_display.style.format({
@@ -523,72 +479,48 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
                 'Net Gross Profit': '${:,.2f}', 'Labor % of (Rev - Mats)': '{:.1f}%'
             }), use_container_width=True, hide_index=True)
             
-            # ---------------------------------------------------------
-            # EXEMPTION STREAM SEGMENTER & CONTRACT VARIANCE AUDITS
-            # ---------------------------------------------------------
             st.write("---")
             st.subheader("🛠️ Lowe's Contract Protections & Revenue Audits")
-            
             col_seg, col_aud = st.columns([4, 5])
             
             with col_seg:
                 st.markdown("#### 🔀 Exemption Stream Segmenter (Water Heaters)")
-                st.caption("Splits completed Water Heater tickets into Standard Retail (subject to Lowe's 15% cut) vs Program Exceptions (LA/PA/RA).")
-                
                 wh_jobs = completed_jobs[completed_jobs['Business Unit'].str.contains('Water Heaters', case=False, na=False)].copy()
-                
                 if not wh_jobs.empty:
                     wh_jobs['Is Exemption'] = wh_jobs.apply(check_is_exemption, axis=1)
                     wh_jobs['Stream Type'] = np.where(wh_jobs['Is Exemption'], "Program Exemption (LA/PA/RA)", "Standard Retail")
-                    
                     wh_stream_summary = wh_jobs.groupby('Stream Type').agg(
-                        Total_Jobs=('Status', 'count'),
-                        Gross_Revenue=('Total Invoice Amount', 'sum'),
-                        Material_Costs=('Material Cost', 'sum'),
-                        Labor_Costs=('Labor Cost', 'sum')
+                        Total_Jobs=('Status', 'count'), Gross_Revenue=('Total Invoice Amount', 'sum'),
+                        Material_Costs=('Material Cost', 'sum'), Labor_Costs=('Labor Cost', 'sum')
                     ).reset_index()
-                    
                     wh_stream_summary['Net Profit'] = wh_stream_summary['Gross_Revenue'] - wh_stream_summary['Material_Costs'] - wh_stream_summary['Labor_Costs']
                     wh_stream_summary['Avg Profit / Job'] = wh_stream_summary['Net Profit'] / wh_stream_summary['Total_Jobs']
-                    
                     wh_stream_summary.columns = ['Revenue Stream', 'Jobs Done', 'Gross Revenue', 'Material Overhead', 'Labor Overhead', 'Net Profit', 'Avg Margin / Job']
                     st.dataframe(wh_stream_summary.style.format({
                         'Gross Revenue': '${:,.2f}', 'Material Overhead': '${:,.2f}', 'Labor Overhead': '${:,.2f}',
                         'Net Profit': '${:,.2f}', 'Avg Margin / Job': '${:,.2f}'
                     }), use_container_width=True, hide_index=True)
-                else:
-                    st.info("No completed water heater tickets found within this file upload range.")
                     
             with col_aud:
                 st.markdown("#### ⚠️ Lowe's 15% Margin Cut Reconciliation Audit")
-                st.caption("Flags standard retail water heater installations where the final processed invoice deviates from the required contract value (85% of original estimate).")
-                
                 if not wh_jobs.empty:
                     wh_standard = wh_jobs[(wh_jobs['Total Estimate Amount'] > 0) & (wh_jobs['Total Invoice Amount'] > 0) & (~wh_jobs['Is Exemption'])].copy()
-                    
                     wh_standard['Expected Invoice'] = wh_standard['Total Estimate Amount'] * 0.85
                     wh_standard['Contract Variance'] = wh_standard['Total Invoice Amount'] - wh_standard['Expected Invoice']
-                    
                     wh_anomalies = wh_standard[wh_standard['Contract Variance'].abs() > 1.00].copy()
-                    
                     if not wh_anomalies.empty:
                         wh_anomalies_display = wh_anomalies[['#ID', 'Assigned Team Members', 'Total Estimate Amount', 'Total Invoice Amount', 'Contract Variance']].sort_values(by='Contract Variance', ascending=True)
                         wh_anomalies_display.columns = ['Job #', 'Primary Tech', 'Original Estimate', 'Lowe\'s Paid Invoice', 'Fee Discrepancy']
-                        
                         st.dataframe(wh_anomalies_display.style.format({
                             'Original Estimate': '${:,.2f}', 'Lowe\'s Paid Invoice': '${:,.2f}', 'Fee Discrepancy': '${:,.2f}'
                         }), use_container_width=True, hide_index=True)
                     else:
-                        st.success("100% Retainage Compliance: All standard retail water heater remittances align with the 15% discount contract threshold.")
-                else:
-                    st.info("No compliance data available for standard retail configurations.")
-            
+                        st.success("100% Retainage Compliance: All standard retail water heater remittances align with contract thresholds.")
+
             st.write("---")
-            
             def color_profit_loss(val):
                 if val < 0: return 'background-color: #f8d7da; color: #721c24;'
-                elif val == 0: return 'background-color: #fff3cd; color: #856404;'
-                else: return 'background-color: #d4edda; color: #155724;'
+                return 'background-color: #d4edda; color: #155724;' if val > 0 else 'background-color: #fff3cd; color: #856404;'
 
             contractor_keywords = ['contractor', 'contactor', 'llc', 'ken', 'barber', 'wrench', 'wrentch', 'presidio', 'indian']
             is_contractor_mask = completed_jobs['Assigned Team Members'].astype(str).str.lower().apply(lambda x: any(k in x for k in contractor_keywords))
@@ -598,32 +530,16 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
             if not contractor_df.empty:
                 contractor_summary = contractor_df.groupby('Assigned Team Members').agg(
                     Total_Jobs=('Status', 'count'), Total_Revenue=('Total Invoice Amount', 'sum'),
-                    Total_Materials=('Material Cost', 'sum'), Total_Payout=('Labor Cost', 'sum'),
-                    Total_Net_Profit=('Net Gross Profit', 'sum')
+                    Total_Materials=('Material Cost', 'sum'), Total_Payout=('Labor Cost', 'sum'), Total_Net_Profit=('Net Gross Profit', 'sum')
                 ).reset_index().sort_values(by='Total_Net_Profit', ascending=True)
-                
                 contractor_summary.columns = ['Contractor Name', 'Total Jobs Done', 'Total Revenue', 'Total Material Overhead', 'Total Payouts', 'Total Net Profit / Loss']
-                styler_summary = contractor_summary.style.format({
-                    'Total Revenue': '${:,.2f}', 'Total Material Overhead': '${:,.2f}',
-                    'Total Payouts': '${:,.2f}', 'Total Net Profit / Loss': '${:,.2f}'
-                })
+                styler_summary = contractor_summary.style.format({'Total Revenue': '${:,.2f}', 'Total Material Overhead': '${:,.2f}', 'Total Payouts': '${:,.2f}', 'Total Net Profit / Loss': '${:,.2f}'})
                 st.dataframe(styler_summary.map(color_profit_loss, subset=['Total Net Profit / Loss']) if hasattr(styler_summary, 'map') else styler_summary.applymap(color_profit_loss, subset=['Total Net Profit / Loss']), use_container_width=True, hide_index=True)
-            
-            st.write("---")
-            
-            st.subheader("🏗️ Contractor Profit & Loss Audit (Job-by-Job Detail)")
-            if not contractor_df.empty:
-                contractor_audit = contractor_df[['#ID', 'Assigned Team Members', 'Business Unit', 'Total Invoice Amount', 'Material Cost', 'Labor Cost', 'Net Gross Profit']].copy().sort_values(by='Net Gross Profit', ascending=True)
-                contractor_audit.columns = ['Job #', 'Contractor', 'Business Unit', 'Gross Revenue', 'Material Cost', 'Contractor Payout', 'Net Profit / Loss']
-                styler_audit = contractor_audit.style.format({
-                    'Gross Revenue': '${:,.2f}', 'Material Cost': '${:,.2f}', 'Contractor Payout': '${:,.2f}', 'Net Profit / Loss': '${:,.2f}'
-                })
-                st.dataframe(styler_audit.map(color_profit_loss, subset=['Net Profit / Loss']) if hasattr(styler_audit, 'map') else styler_audit.applymap(color_profit_loss, subset=['Net Profit / Loss']), use_container_width=True, hide_index=True)
         else:
             st.warning("No completed financial data available to build margins.")
 
     # ---------------------------------------------------------
-    # TAB 3: Geographic Performance (FULL STREET ADDRESS LAYER)
+    # TAB 3: Geographic Performance (VOLUME SHADED HEATMAP)
     # ---------------------------------------------------------
     with tab3:
         st.header("Geographic Profitability & Travel Time Analysis")
@@ -638,56 +554,87 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
         if 'Assigned Team Members' in geo_df.columns:
             geo_df = geo_df.dropna(subset=['Assigned Team Members'])
 
+        if 'Zip Code' in geo_df.columns:
+            geo_df['Zip Code'] = geo_df['Zip Code'].astype(str).str.strip().str.replace(r'\.0$', '', regex=True)
+            geo_df = geo_df[(geo_df['Zip Code'] != 'nan') & (geo_df['Zip Code'] != '') & (geo_df['Zip Code'] != 'None')]
+
         if 'Full Address' in geo_df.columns:
             geo_df['Full Address'] = geo_df['Full Address'].astype(str).str.strip()
             geo_df = geo_df[(geo_df['Full Address'] != '') & (geo_df['Full Address'].str.lower() != 'nan')]
 
         if 'Full Address' in geo_df.columns and not geo_df.empty:
-            
-            st.subheader("🗺️ Exact Location Revenue Heatmap")
-            st.write("Pins represent individual properties. **Bubble sizes scale proportionally** relative to job transaction volume.")
+            st.subheader("🗺️ Zonal Density Shading Map")
+            st.write("Zip code regions shaded by total operational volume. **Darker red rings indicate higher concentrations of work orders**.")
             
             # Extract unique address strings to optimize batch execution loops
             unique_addresses = [a for a in geo_df['Full Address'].unique() if len(str(a).strip()) > 5]
             
             if unique_addresses:
                 address_coordinate_lookup = {}
-                
-                # Setup Streamlit UI progress track for structural transparency during first run execution
-                progress_text = "Resolving exact properties... mapping locations."
+                progress_text = "Parsing operational maps... matching addresses."
                 geo_bar = st.progress(0.0, text=progress_text)
                 
                 for index, addr in enumerate(unique_addresses):
                     coords = geocode_address_string(addr)
                     if coords:
                         address_coordinate_lookup[addr] = coords
-                    
-                    # Comply gracefully with Nominatim rate requirements during first-time database builds
-                    # (Cached items execute instantly with zero sleep delay penalty)
                     if index % 3 == 0:
                         time.sleep(0.1)
-                        
                     fraction = (index + 1) / len(unique_addresses)
                     geo_bar.progress(fraction, text=f"Processing property {index + 1} of {len(unique_addresses)}")
                 
                 geo_bar.empty()
                 
-                # Apply localized coordinates dictionary map back to main data frame rows
                 geo_df['latitude'] = geo_df['Full Address'].map(lambda x: address_coordinate_lookup.get(x, (None, None))[0])
                 geo_df['longitude'] = geo_df['Full Address'].map(lambda x: address_coordinate_lookup.get(x, (None, None))[1])
-                
                 map_render_df = geo_df.dropna(subset=['latitude', 'longitude']).copy()
                 
                 if not map_render_df.empty:
-                    # Configure bubbles to expand linearly based on ticket financial value weights
-                    base_radius = 25.0
-                    max_rev_found = map_render_df['Total Invoice Amount'].max()
-                    if max_rev_found <= 0: max_rev_found = 1.0
+                    # Group by Zip Code to calculate job volumes and establish geographic centers
+                    zip_geo_counts = map_render_df.groupby('Zip Code').agg(
+                        Job_Count=('Zip Code', 'count'),
+                        latitude=('latitude', 'mean'),
+                        longitude=('longitude', 'mean')
+                    ).reset_index()
                     
-                    map_render_df['bubble_size'] = base_radius + (map_render_df['Total Invoice Amount'] / max_rev_found) * 200.0
+                    max_jobs_found = zip_geo_counts['Job_Count'].max() if not zip_geo_counts.empty else 1
                     
-                    # Display native visual maps
-                    st.map(map_render_df, latitude='latitude', longitude='longitude', size='bubble_size')
+                    # Compute dynamic red color scale mapping: high volume = solid dark crimson
+                    def calculate_rgba_ramp(count, max_val):
+                        ratio = count / max_val
+                        alpha_transparency = int(60 + (ratio * 165))  # Scales opacity from 60 to 225
+                        return [200, 20, 20, alpha_transparency]
+                        
+                    zip_geo_counts['fill_color'] = zip_geo_counts['Job_Count'].apply(lambda c: calculate_rgba_ramp(c, max_jobs_found))
+                    zip_geo_counts['radius_meters'] = 2800  # Approximates standard suburban layout radius
+                    
+                    # Render the specialized Pydeck choropleth chart replacement layer
+                    density_layer = pdk.Layer(
+                        "ScatterplotLayer",
+                        zip_geo_counts,
+                        get_position="[longitude, latitude]",
+                        get_fill_color="fill_color",
+                        get_radius="radius_meters",
+                        pickable=True,
+                        opacity=0.8,
+                        stroked=True,
+                        get_line_color=[130, 10, 10, 120],
+                        line_width_min_pixels=1.5
+                    )
+                    
+                    view_state = pdk.ViewState(
+                        latitude=zip_geo_counts['latitude'].mean(),
+                        longitude=zip_geo_counts['longitude'].mean(),
+                        zoom=9.2,
+                        pitch=0
+                    )
+                    
+                    st.pydeck_chart(pdk.Deck(
+                        layers=[density_layer],
+                        initial_view_state=view_state,
+                        map_style="mapbox://styles/mapbox/light-v9",
+                        tooltip={"text": "Zip Code Zone: {Zip Code}\nTotal Job Volume: {Job_Count} tickets"}
+                    ))
                 else:
                     st.warning("Could not match addresses to exact GPS vectors. Verify address strings contain street numbers.")
             else:
@@ -696,19 +643,12 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
             st.markdown("---")
             
             # --- METRICS TABLES ---
-            if 'Zip Code' in geo_df.columns:
-                geo_df['Zip Code'] = geo_df['Zip Code'].astype(str).str.strip().str.replace(r'\.0$', '', regex=True)
-                geo_df = geo_df[(geo_df['Zip Code'] != 'nan') & (geo_df['Zip Code'] != '') & (geo_df['Zip Code'] != 'None')]
-            
             col3, col4 = st.columns(2)
             with col3:
                 st.subheader("💰 Most Lucrative Zip Codes (Net Profit)")
                 profit_col = 'Profit Margin' if ('Profit Margin' in geo_df.columns and geo_df['Profit Margin'].sum() != 0) else 'Net Gross Profit'
-                
                 profit_by_zip = geo_df.groupby('Zip Code').agg(
-                    Job_Count=('Zip Code', 'count'), 
-                    Total_Net_Profit=(profit_col, 'sum'), 
-                    Avg_Profit_Per_Job=(profit_col, 'mean')
+                    Job_Count=('Zip Code', 'count'), Total_Net_Profit=(profit_col, 'sum'), Avg_Profit_Per_Job=(profit_col, 'mean')
                 ).reset_index().sort_values('Total_Net_Profit', ascending=False)
                 
                 profit_by_zip.columns = ['Zip Code', 'Total Jobs', 'Total Net Profit', 'Avg Profit/Job']
