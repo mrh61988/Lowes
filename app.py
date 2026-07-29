@@ -15,7 +15,7 @@ st.title("Water Heater & Simple Installs Operations Dashboard")
 st.write("Data filtered exclusively for **Water Heaters** and **Simple Installs** business units. Multi-tech jobs are attributed solely to the primary (first named) technician.")
 
 # ---------------------------------------------------------
-# GLOBAL GEOGRAPHIC SEED DICTIONARY (ARIZONA)
+# GLOBAL GEOGRAPHIC SEED DICTIONARY (ARIZONA INSTANT LOOKUP)
 # ---------------------------------------------------------
 AZ_ZIP_COORDINATES = {
     '85258': (33.5634, -111.8927), '85750': (32.2980, -110.8449), 
@@ -61,7 +61,7 @@ def load_regional_geojson_boundaries():
     """Streams minified geometric boundary vectors for localized Arizona postal code grids."""
     url = "https://raw.githubusercontent.com/OpenDataDE/State-zip-code-GeoJSON/master/az_arizona_zip_codes_geo.min.json"
     try:
-        req = urllib.request.Request(url, headers={'User-Agent': 'OpsCode_GeoEngine/9.0'})
+        req = urllib.request.Request(url, headers={'User-Agent': 'OpsCode_GeoEngine/10.0'})
         with urllib.request.urlopen(req, timeout=12) as response:
             return json.loads(response.read().decode())
     except Exception:
@@ -81,7 +81,7 @@ def geocode_address_string(address_str):
     encoded_query = urllib.parse.quote(query_string)
     url = f"https://nominatim.openstreetmap.org/search?q={encoded_query}&format=json&limit=1"
     try:
-        req = urllib.request.Request(url, headers={'User-Agent': 'OpsManagerDashboard_Geomap/9.0'})
+        req = urllib.request.Request(url, headers={'User-Agent': 'OpsManagerDashboard_Geomap/10.0'})
         with urllib.request.urlopen(req, timeout=4) as response:
             data = json.loads(response.read().decode())
             if data:
@@ -301,6 +301,7 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
     jobs_df['Material Cost'] = jobs_df.apply(calculate_job_material_cost, axis=1)
     jobs_df['Net Gross Profit'] = jobs_df['Total Invoice Amount'] - jobs_df['Material Cost'] - jobs_df['Labor Cost']
 
+    # ALL DATA IS LOADED HIERARCHICALLY AND MADE COMPLETELY VIEWABLE
     tab1, tab2, tab3 = st.tabs(["Technician & Job Metrics", "Financial & Labor ROI", "Geographic Performance"])
 
     with tab1:
@@ -327,7 +328,7 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
             st.dataframe(fin_metrics.style.format({'Total_Revenue': '${:,.2f}'}), use_container_width=True, hide_index=True)
 
     # ---------------------------------------------------------
-    # TAB 3: GEOGRAPHIC PERFORMANCE (STABILIZED MULTI-LAYER PIPELINE)
+    # TAB 3: GEOGRAPHIC PERFORMANCE (LAZY-LOAD ARCHITECTURE)
     # ---------------------------------------------------------
     with tab3:
         st.header("Geographic Profitability & Travel Time Analysis")
@@ -344,18 +345,23 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
 
         if not geo_df.empty:
             st.subheader("🗺️ Regional Density Choropleth Map")
-            st.write("Shaded areas track high-volume zip codes. Blue pins showcase exact address geolocations.")
             
-            with st.spinner("Resolving street addresses to precise geo-coordinates..."):
+            # THE LAZY-LOAD SWITCH: Keeps app responsive instantly. True = precision dots via network API.
+            enable_street_precision = st.toggle("🔍 Enable Precision Street-Level Geocoding (Hits live network maps, takes a few seconds)", value=False)
+            st.write("Shaded areas track high-volume zip codes. Blue pins showcase geolocations.")
+            
+            with st.spinner("Processing spatial maps framework..."):
                 def resolve_exact_coordinates(row):
-                    addr = str(row.get('Full Address', '')).strip()
-                    if addr and addr.lower() != 'nan' and len(addr) > 5:
-                        coords = geocode_address_string(addr)
-                        if coords:
-                            return coords[0], coords[1]
+                    # Speed 2: Execute street requests only if explicitly turned on by user
+                    if enable_street_precision:
+                        addr = str(row.get('Full Address', '')).strip()
+                        if addr and addr.lower() != 'nan' and len(addr) > 5:
+                            coords = geocode_address_string(addr)
+                            if coords:
+                                return coords[0], coords[1]
                     
+                    # Speed 1: Instant baseline data alignment via internal array lookups
                     z_code = str(row.get('Zip Code', '')).strip()
-                    # Safe fallback wrapper to avoid future NameErrors
                     if 'AZ_ZIP_COORDINATES' in globals() and z_code in AZ_ZIP_COORDINATES:
                         return AZ_ZIP_COORDINATES[z_code]
                     return np.nan, np.nan
