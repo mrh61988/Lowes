@@ -8,6 +8,18 @@ st.title("Water Heater & Simple Installs Operations Dashboard")
 st.write("Data filtered exclusively for **Water Heaters** and **Simple Installs** business units. Multi-tech jobs are attributed solely to the primary (first named) technician.")
 
 # ---------------------------------------------------------
+# TIME FORMATTING HELPER FUNCTION
+# ---------------------------------------------------------
+def format_hours_mins(decimal_hours):
+    """Converts a decimal hour value (e.g., 1.25) into an H:MM string format (e.g., 1:15)"""
+    if pd.isna(decimal_hours) or decimal_hours is None:
+        return "-"
+    total_minutes = int(round(decimal_hours * 60))
+    hours = total_minutes // 60
+    minutes = total_minutes % 60
+    return f"{hours}:{minutes:02d}"
+
+# ---------------------------------------------------------
 # 1. SIDEBAR FILE UPLOADS
 # ---------------------------------------------------------
 st.sidebar.header("📁 Upload Operational Data")
@@ -46,7 +58,7 @@ if raw_jobs_df is not None and invoices_df is not None:
         jobs_df = raw_jobs_df.copy()
         st.sidebar.warning("Warning: 'Business Unit' column not found. Showing all jobs.")
 
-    # --- STAGE 2: ATTRIBUTE MULTI-TECH JOBS TO FIRST NAMED TECH (REPAIRED) ---
+    # --- STAGE 2: ATTRIBUTE MULTI-TECH JOBS TO FIRST NAMED TECH ---
     if 'Assigned Team Members' in jobs_df.columns:
         # Using native vectorized string operations to prevent backend/Arrow type errors
         jobs_df['Assigned Team Members'] = jobs_df['Assigned Team Members'].astype(str).str.split(',').str[0].str.strip()
@@ -92,10 +104,10 @@ if raw_jobs_df is not None and invoices_df is not None:
                 ).reset_index().sort_values('Total_Jobs_Completed', ascending=False)
                 
                 # Format for clean viewing
-                tech_metrics.columns = ['Technician Name', 'Jobs Completed', 'Avg Job Hours', 'Total Revenue', 'Avg Revenue/Job']
+                tech_metrics.columns = ['Technician Name', 'Jobs Completed', 'Avg Job Time (H:MM)', 'Total Revenue', 'Avg Revenue/Job']
                 st.dataframe(
                     tech_metrics.style.format({
-                        'Avg Job Hours': '{:.2f}', 
+                        'Avg Job Time (H:MM)': format_hours_mins, 
                         'Total Revenue': '${:,.2f}', 
                         'Avg Revenue/Job': '${:,.2f}'
                     }), 
@@ -113,10 +125,10 @@ if raw_jobs_df is not None and invoices_df is not None:
                     Total_Revenue=('Total Invoice Amount', 'sum')
                 ).reset_index().sort_values('Job_Count', ascending=False)
                 
-                job_mix.columns = ['Job Title / Type', 'Volume Done', 'Avg Hours Spent', 'Avg Ticket Size', 'Total Revenue']
+                job_mix.columns = ['Job Title / Type', 'Volume Done', 'Avg Time Spent (H:MM)', 'Avg Ticket Size', 'Total Revenue']
                 st.dataframe(
                     job_mix.style.format({
-                        'Avg Hours Spent': '{:.2f}', 
+                        'Avg Time Spent (H:MM)': format_hours_mins, 
                         'Avg Ticket Size': '${:,.2f}', 
                         'Total Revenue': '${:,.2f}'
                     }),
@@ -181,10 +193,10 @@ if raw_jobs_df is not None and invoices_df is not None:
                         Avg_Invoice_Amount=('Total Invoice Amount', 'mean')
                     ).reset_index().sort_values('Avg_Travel_Hours', ascending=False)
                     
-                    travel_waste.columns = ['Zip Code', 'Total Jobs', 'Avg Drive Time (Hours)', 'Avg Ticket Size']
+                    travel_waste.columns = ['Zip Code', 'Total Jobs', 'Avg Drive Time (H:MM)', 'Avg Ticket Size']
                     st.dataframe(
                         travel_waste.style.format({
-                            'Avg Drive Time (Hours)': '{:.2f}', 
+                            'Avg Drive Time (H:MM)': format_hours_mins, 
                             'Avg Ticket Size': '${:,.2f}'
                         }), 
                         use_container_width=True,
