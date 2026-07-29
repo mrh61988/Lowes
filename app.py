@@ -224,10 +224,24 @@ timesheets_df = process_uploaded_file(uploaded_timesheets, shifted_header=False)
 # ---------------------------------------------------------
 if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not None:
     
-    # Strip whitespace out of raw header elements immediately
-    raw_jobs_df.columns = [str(c).strip() for c in raw_jobs_df.columns]
-    invoices_df.columns = [str(c).strip() for c in invoices_df.columns]
-    timesheets_df.columns = [str(c).strip() for c in timesheets_df.columns]
+    # --- AUTOMATED HEADER DEDUPLICATION UTILITY ---
+    def sanitize_and_deduplicate_headers(df):
+        seen = {}
+        new_columns = []
+        for col in df.columns:
+            clean_col = str(col).strip()
+            if clean_col in seen:
+                seen[clean_col] += 1
+                new_columns.append(f"{clean_col}_{seen[clean_col]}")
+            else:
+                seen[clean_col] = 0
+                new_columns.append(clean_col)
+        df.columns = new_columns
+        return df
+
+    raw_jobs_df = sanitize_and_deduplicate_headers(raw_jobs_df)
+    invoices_df = sanitize_and_deduplicate_headers(invoices_df)
+    timesheets_df = sanitize_and_deduplicate_headers(timesheets_df)
     
     # --- AUTO-MAPPING FOR TIMESHEETS CSV ---
     ts_cols = list(timesheets_df.columns)
@@ -278,7 +292,7 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
     jobs_df_clean['Related Invoices'] = raw_jobs_df[mapped_rel_inv].fillna('').astype(str) if mapped_rel_inv else ''
     jobs_df_clean['#ID'] = raw_jobs_df[mapped_id].fillna('').astype(str) if mapped_id else raw_jobs_df.index.astype(str)
 
-    # Re-apply tracking columns dynamically for custom timestamp lookups
+    # Re-apply tracking columns dynamically for custom timestamp lookups (Fix applied: columns are now deduplicated strings)
     for col in raw_jobs_df.columns:
         if 'timestamp' in str(col).lower():
             jobs_df_clean[col] = raw_jobs_df[col]
