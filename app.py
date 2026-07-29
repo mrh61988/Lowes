@@ -110,7 +110,7 @@ def process_uploaded_file(file, shifted_header=True):
 
 raw_jobs_df = process_uploaded_file(uploaded_jobs, shifted_header=True)
 invoices_df = process_uploaded_file(uploaded_invoices, shifted_header=True)
-timesheets_df = process_uploaded_file(uploaded_timesheets, shifted_header=False) # Standard format CSV
+timesheets_df = process_uploaded_file(uploaded_timesheets, shifted_header=False)
 
 # ---------------------------------------------------------
 # 2. DASHBOARD LOGIC
@@ -195,7 +195,7 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
             st.write("---")
             
             # ---------------------------------------------------------
-            # ADDED TABLE: CLOCK HOURS VS TICKET HOURS AUDITING LOG
+            # FIXED TABLE: CLOCK HOURS VS TICKET HOURS AUDITING LOG
             # ---------------------------------------------------------
             st.subheader("⏰ Clock Hours vs. Ticket Hours Auditing Log")
             st.write("Exposes unallocated time by contrasting total clocked timesheet hours against direct billable job durations.")
@@ -210,7 +210,6 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
                 ts_hours = ts_match['Duration Decimal'].values[0] if not ts_match.empty else 0.0
                 unallocated = max(0.0, ts_hours - j_hours)
                 
-                # Check if internal hourly worker to append payroll waste impact
                 is_hourly = tech in ['Matt Schlosser', 'Tanner LaForge', 'Edward Lopez']
                 waste_cost = unallocated * 25.00 if is_hourly else 0.0
                 
@@ -224,16 +223,15 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
                 
             utilization_df = pd.DataFrame(utilization_records).sort_values(by='Unallocated Variance (Hours)', ascending=False)
             
-            st.dataframe(
-                utilization_df.style.format({
-                    'Paid Clock Hours (Timesheets)': '{:.2f} hrs',
-                    'On-Ticket Hours (Jobs)': '{:.2f} hrs',
-                    'Unallocated Variance (Hours)': '{:.2f} hrs',
-                    'Hourly Payroll Slippage': '${:,.2f}'
-                }).clear().highlight_null(color='transparent'), 
-                use_container_width=True, 
-                hide_index=True
-            )
+            # Formatted using na_rep='-' to cleanly display non-hourly rows without crashing
+            styler_utilization = utilization_df.style.format({
+                'Paid Clock Hours (Timesheets)': '{:.2f} hrs',
+                'On-Ticket Hours (Jobs)': '{:.2f} hrs',
+                'Unallocated Variance (Hours)': '{:.2f} hrs',
+                'Hourly Payroll Slippage': '${:,.2f}'
+            }, na_rep='-')
+            
+            st.dataframe(styler_utilization, use_container_width=True, hide_index=True)
         else:
             st.warning("No 'Completed' status jobs found.")
 
@@ -247,7 +245,6 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
             st.subheader("📊 Aggregate Team Efficiency")
             st.write("Hourly employee labor is drawn directly from **Timesheets** at **$25.00/hr**, matching actual cash outflows.")
             
-            # Calculate base fields from jobs
             fin_metrics = completed_jobs.groupby('Assigned Team Members').agg(
                 Jobs_Completed=('Status', 'count'),
                 Total_Revenue=('Total Invoice Amount', 'sum'),
@@ -255,7 +252,6 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
                 Total_Labor_Cost_Jobs=('Labor Cost', 'sum')
             ).reset_index()
             
-            # Timesheet calculations
             ts_totals_finance = timesheets_df.groupby('User')['Duration Decimal'].sum().reset_index()
             hourly_techs_list = ['Matt Schlosser', 'Tanner LaForge', 'Edward Lopez']
             
@@ -267,11 +263,9 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
                         return match['Duration Decimal'].values[0] * 25.00
                 return row['Total_Labor_Cost_Jobs']
             
-            # Assign accurate payroll overhead
             fin_metrics['Labor Cost Burden'] = fin_metrics.apply(determine_true_labor, axis=1)
             fin_metrics['Net Gross Profit'] = fin_metrics['Total_Revenue'] - fin_metrics['Total_Material_Cost'] - fin_metrics['Labor Cost Burden']
             
-            # Recalculated Metric: Labor Cost Burden / (Revenue - Materials)
             revenue_minus_materials = fin_metrics['Total_Revenue'] - fin_metrics['Total_Material_Cost']
             fin_metrics['Labor % of Rev Less Mats'] = (fin_metrics['Labor Cost Burden'] / revenue_minus_materials) * 100
             fin_metrics['Labor % of Rev Less Mats'] = fin_metrics['Labor % of Rev Less Mats'].replace([np.inf, -np.inf], np.nan).fillna(0.0)
@@ -294,7 +288,6 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
             
             st.write("---")
             
-            # Helper color rule using raw CSS styles (Safe across different Pandas versions)
             def color_profit_loss(val):
                 if val < 0:
                     return 'background-color: #f8d7da; color: #721c24;'
@@ -303,7 +296,6 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
                 else:
                     return 'background-color: #d4edda; color: #155724;'
 
-            # Shared filter logic for contractors
             contractor_keywords = ['contractor', 'contactor', 'llc', 'ken', 'barber', 'wrench', 'wrentch', 'presidio', 'indian']
             is_contractor_mask = completed_jobs['Assigned Team Members'].astype(str).str.lower().apply(
                 lambda x: any(k in x for k in contractor_keywords)
