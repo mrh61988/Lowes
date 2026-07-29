@@ -93,6 +93,7 @@ def calculate_job_labor_cost(row):
     if pd.isna(duration): duration = 0.0
     if pd.isna(revenue): revenue = 0.0
     
+    # Base Job costings (remains proportional on single ticket evaluations)
     if tech == 'Sean Marble':
         return duration * (70000 / 2080)
     elif tech == 'Mathew Hodges':
@@ -119,7 +120,14 @@ def calculate_job_labor_cost(row):
 def calculate_job_material_cost(row):
     tech = str(row['Assigned Team Members']).lower()
     bu = str(row['Business Unit']).lower()
-    base_mat = row['Invoice - Total Product Cost'] + row['Invoice - Total Service Cost']
+    
+    prod_cost = pd.to_numeric(row['Invoice - Total Product Cost'], errors='coerce')
+    serv_cost = pd.to_numeric(row['Invoice - Total Service Cost'], errors='coerce')
+    
+    if pd.isna(prod_cost): prod_cost = 0.0
+    if pd.isna(serv_cost): serv_cost = 0.0
+    
+    base_mat = prod_cost + serv_cost
     is_contractor = any(k in tech for k in ['contractor', 'contactor', 'llc', 'ken', 'barber', 'wrench', 'wrentch', 'presidio', 'indian'])
     
     if is_contractor:
@@ -190,6 +198,19 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
 
     if 'Profit Margin' in invoices_df.columns:
         invoices_df['Profit Margin'] = pd.to_numeric(invoices_df['Profit Margin'], errors='coerce').fillna(0.0)
+
+    # Calculate dynamic scope window from timesheet dates
+    valid_ts_dates = timesheets_df['Work Date'].dropna()
+    if not valid_ts_dates.empty:
+        days_span = (max(valid_ts_dates) - min(valid_ts_dates)).days + 1
+        # Normalize standard 5-day or 6-day standard field weeks up to a full 7-day salary block
+        if days_span in [5, 6]:
+            total_weeks = 1.0
+        else:
+            total_weeks = max(1, days_span) / 7.0
+    else:
+        days_span = 7
+        total_weeks = 1.0
 
     jobs_df['Labor Cost'] = jobs_df.apply(calculate_job_labor_cost, axis=1)
     jobs_df['Material Cost'] = jobs_df.apply(calculate_job_material_cost, axis=1)
@@ -267,7 +288,7 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
 
             st.write("---")
 
-            # NEW DAILY DEEP DIVE FOR HOURLY TECHS
+            # DAILY DEEP DIVE FOR HOURLY TECHS
             st.subheader("🔍 Daily Slippage Deep Dive (Hourly Crew)")
             st.write("Identifies explicit dates where hourly field personnel experienced substantial time leaks between active job statuses and paid clock time.")
             
@@ -305,6 +326,9 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
     with tab2:
         st.header("Financial Performance & Labor Cost Analysis")
         
+        # Display Auto-Detected Scope Metric card/banner to build audit trails for upper management
+        st.info(f"📅 **Dataset Scope Auto-Detected:** The uploaded logs span **{days_span} calendar days** ({total_weeks:.2f} weeks). Salaried overhead is computed using **{total_weeks:.2f} weeks of full salary burden** (Sean Marble: ${70000/52*total_weeks:,.2f}, Mathew Hodges: ${65000/52*total_weeks:,.2f}) to match this specific tracking window.")
+        
         if not completed_jobs.empty:
             st.subheader("📊 Aggregate Team Efficiency")
             fin_metrics = completed_jobs.groupby('Assigned Team Members').agg(
@@ -317,12 +341,21 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
             ts_totals_finance = timesheets_df.groupby('User')['Duration Decimal'].sum().reset_index()
             hourly_techs_list = ['Matt Schlosser', 'Tanner LaForge', 'Edward Lopez']
             
+            # TRUE LABOUR ALIGNMENT ENGINE (DYNAMICAL TIME SPANS ACCEPTER)
             def determine_true_labor(row):
                 tech = row['Assigned Team Members']
+                # 1. Hourly Crew: Paid Clock Hours from Timesheets * $25
                 if tech in hourly_techs_list:
                     match = ts_totals_finance[ts_totals_finance['User'] == tech]
                     if not match.empty:
                         return match['Duration Decimal'].values[0] * 25.00
+                    return 0.0
+                # 2. Salaried Crew: Scaled to cover full salary burden of the dataset timeframe
+                elif tech == 'Sean Marble':
+                    return total_weeks * (70000 / 52)
+                elif tech == 'Mathew Hodges':
+                    return total_weeks * (65000 / 52)
+                # 3. Commission/Contractors: Payout rules aggregated from ticket details
                 return row['Total_Labor_Cost_Jobs']
             
             fin_metrics['Labor Cost Burden'] = fin_metrics.apply(determine_true_labor, axis=1)
