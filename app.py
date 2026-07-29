@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+import re
 
 # Set page configuration
 st.set_page_config(page_title="Ops Manager Dashboard", layout="wide")
@@ -21,6 +22,39 @@ def format_hours_mins(decimal_hours):
     return f"{hours}:{minutes:02d}"
 
 # ---------------------------------------------------------
+# AUTOMATED DATA SANITIZER HELPER
+# ---------------------------------------------------------
+def sanitize_numeric_series(series):
+    """Cleans currency symbols, formatting commas, and whitespace to extract pure numeric values."""
+    cleaned = series.astype(str).str.replace(r'[^\d.-]', '', regex=True)
+    return pd.to_numeric(cleaned, errors='coerce').fillna(0.0)
+
+# ---------------------------------------------------------
+# RESILIENT AUTOMATIC COLUMN SCANNING ENGINE
+# ---------------------------------------------------------
+def auto_map_column(keys, columns, exclude_keys=None):
+    """Scans variations of column names using prioritized exact and wildcard matches."""
+    columns_lower = [str(c).lower().strip() for c in columns]
+    # Priority 1: Direct exact match match
+    for k in keys:
+        if k in columns_lower:
+            return columns[columns_lower.index(k)]
+    # Priority 2: Safe contextual wildcard match
+    for k in keys:
+        for col in columns:
+            col_lower = str(col).lower()
+            if k in col_lower:
+                if exclude_keys and any(ex in col_lower for ex in exclude_keys):
+                    continue
+                return col
+    # Priority 3: Fallback matching
+    for k in keys:
+        for col in columns:
+            if k in str(col).lower():
+                return col
+    return None
+
+# ---------------------------------------------------------
 # DYNAMIC ON-TICKET TIME CALCULATOR ENGINE
 # ---------------------------------------------------------
 def compute_custom_ticket_hours(row, cols):
@@ -34,20 +68,21 @@ def compute_custom_ticket_hours(row, cols):
     start_times = []
     end_times = []
     
-    # Iterate via integer indexes to avoid duplicate string header evaluation issues
     for idx, col_name in enumerate(cols):
         val = row.iloc[idx]
         if pd.isna(val) or str(val).strip() in ['', '-']:
             continue
             
+        col_clean = str(col_name).lower()
         # Target Start Milestones
-        if col_name in ['On The Way - Start Timestamp', 'Lowes Store - Start Timestamp', 'In Progress - Start Timestamp']:
-            t = pd.to_datetime(val, errors='coerce')
-            if pd.notna(t):
-                start_times.append(t)
+        if 'on the way' in col_clean or 'lowes store' in col_clean or 'in progress' in col_clean:
+            if 'start timestamp' in col_clean:
+                t = pd.to_datetime(val, errors='coerce')
+                if pd.notna(t):
+                    start_times.append(t)
                 
         # Target End Milestone
-        if col_name == 'Pending Audit - Start Timestamp':
+        if 'pending audit' in col_clean and 'start timestamp' in col_clean:
             t = pd.to_datetime(val, errors='coerce')
             if pd.notna(t):
                 end_times.append(t)
@@ -71,10 +106,12 @@ def compute_job_date(row, cols):
         val = row.iloc[idx]
         if pd.isna(val) or str(val).strip() in ['', '-']:
             continue
-        if col_name in ['On The Way - Start Timestamp', 'Lowes Store - Start Timestamp', 'In Progress - Start Timestamp']:
-            t = pd.to_datetime(val, errors='coerce')
-            if pd.notna(t):
-                start_times.append(t)
+        col_clean = str(col_name).lower()
+        if 'on the way' in col_clean or 'lowes store' in col_clean or 'in progress' in col_clean:
+            if 'start timestamp' in col_clean:
+                t = pd.to_datetime(val, errors='coerce')
+                if pd.notna(t):
+                    start_times.append(t)
     if start_times:
         return min(start_times).date()
     if 'Start Date' in row and pd.notna(row['Start Date']):
@@ -187,32 +224,87 @@ timesheets_df = process_uploaded_file(uploaded_timesheets, shifted_header=False)
 # ---------------------------------------------------------
 if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not None:
     
-    if 'Duration Decimal' in timesheets_df.columns:
-        timesheets_df['Duration Decimal'] = pd.to_numeric(timesheets_df['Duration Decimal'], errors='coerce').fillna(0.0)
-    if 'Clock In Date' in timesheets_df.columns:
-        timesheets_df['Work Date'] = pd.to_datetime(timesheets_df['Clock In Date'], errors='coerce').dt.date
+    # Strip whitespace out of raw header elements immediately
+    raw_jobs_df.columns = [str(c).strip() for c in raw_jobs_df.columns]
+    invoices_df.columns = [str(c).strip() for c in invoices_df.columns]
+    timesheets_df.columns = [str(c).strip() for c in timesheets_df.columns]
     
-    if 'Business Unit' in raw_jobs_df.columns:
-        jobs_df = raw_jobs_df[raw_jobs_df['Business Unit'].str.contains('Water Heaters|Simple Installs', case=False, na=False)].copy()
+    # --- AUTO-MAPPING FOR TIMESHEETS CSV ---
+    ts_cols = list(timesheets_df.columns)
+    ts_user_col = auto_map_column(['user', 'name', 'technician', 'employee'], ts_cols)
+    ts_dur_col = auto_map_column(['duration decimal', 'hours', 'total hours', 'duration'], ts_cols)
+    ts_date_col = auto_map_column(['clock in date', 'date', 'work date', 'timestamp'], ts_cols)
+    
+    if ts_user_col and ts_user_col != 'User':
+        timesheets_df['User'] = timesheets_df[ts_user_col]
+    if ts_dur_col:
+        timesheets_df['Duration Decimal'] = sanitize_numeric_series(timesheets_df[ts_dur_col])
     else:
-        jobs_df = raw_jobs_df.copy()
+        timesheets_df['Duration Decimal'] = 0.0
+    if ts_date_col:
+        timesheets_df['Work Date'] = pd.to_datetime(timesheets_df[ts_date_col], errors='coerce').dt.date
 
-    if 'Assigned Team Members' in jobs_df.columns:
-        jobs_df['Assigned Team Members'] = jobs_df['Assigned Team Members'].astype(str).str.split(',').str[0].str.strip()
-        jobs_df['Assigned Team Members'] = jobs_df['Assigned Team Members'].replace(['nan', 'None', ''], None)
+    # --- AUTO-MAPPING FOR JOBS CSV ---
+    job_cols_list = list(raw_jobs_df.columns)
+    mapped_bu = auto_map_column(['business unit', 'department', 'bu', 'stream'], job_cols_list)
+    mapped_tech = auto_map_column(['assigned team members', 'technician', 'lead tech', 'resource', 'name'], job_cols_list, exclude_keys=['id', '#', 'num'])
+    mapped_rev = auto_map_column(['total invoice amount', 'revenue', 'amount', 'total', 'price', 'billed'], job_cols_list)
+    mapped_est = auto_map_column(['total estimate amount', 'estimate', 'quote', 'estimated cost'], job_cols_list)
+    mapped_job_dur = auto_map_column(['job duration decimal', 'job duration', 'wrench hours'], job_cols_list)
+    mapped_trav_dur = auto_map_column(['travel duration decimal', 'travel duration', 'drive hours'], job_cols_list)
+    mapped_prod = auto_map_column(['invoice - total product cost', 'product cost', 'parts', 'materials'], job_cols_list)
+    mapped_serv = auto_map_column(['invoice - total service cost', 'service cost', 'labor cost baseline'], job_cols_list)
+    mapped_title = auto_map_column(['title', 'job title', 'summary', 'description'], job_cols_list)
+    mapped_tags = auto_map_column(['tags', 'label', 'work type'], job_cols_list)
+    mapped_status = auto_map_column(['status', 'job status', 'state'], job_cols_list)
+    mapped_zip = auto_map_column(['zip code', 'zip', 'postal'], job_cols_list)
+    mapped_rel_inv = auto_map_column(['related invoices', 'invoice id', 'related invoice', 'invoice #'], job_cols_list)
+    mapped_id = auto_map_column(['#id', 'job id', 'ticket number', 'id', 'wo #'], job_cols_list)
 
-    numeric_cols_jobs = ['Total Invoice Amount', 'Total Estimate Amount', 'Job Duration Decimal', 'Travel Duration Decimal', 
-                         'Invoice - Total Product Cost', 'Invoice - Total Service Cost']
-    for col in numeric_cols_jobs:
-        if col in jobs_df.columns:
-            jobs_df[col] = pd.to_numeric(jobs_df[col], errors='coerce').fillna(0.0)
+    # Standardize data structures to run with expected downstream variable structures
+    jobs_df_clean = pd.DataFrame()
+    jobs_df_clean['Business Unit'] = raw_jobs_df[mapped_bu].fillna('General').astype(str) if mapped_bu else 'General'
+    jobs_df_clean['Assigned Team Members'] = raw_jobs_df[mapped_tech].fillna('Unknown Tech').astype(str) if mapped_tech else 'Unknown Tech'
+    jobs_df_clean['Total Invoice Amount'] = sanitize_numeric_series(raw_jobs_df[mapped_rev]) if mapped_rev else 0.0
+    jobs_df_clean['Total Estimate Amount'] = sanitize_numeric_series(raw_jobs_df[mapped_est]) if mapped_est else 0.0
+    jobs_df_clean['Job Duration Decimal'] = sanitize_numeric_series(raw_jobs_df[mapped_job_dur]) if mapped_job_dur else 0.0
+    jobs_df_clean['Travel Duration Decimal'] = sanitize_numeric_series(raw_jobs_df[mapped_trav_dur]) if mapped_trav_dur else 0.0
+    jobs_df_clean['Invoice - Total Product Cost'] = sanitize_numeric_series(raw_jobs_df[mapped_prod]) if mapped_prod else 0.0
+    jobs_df_clean['Invoice - Total Service Cost'] = sanitize_numeric_series(raw_jobs_df[mapped_serv]) if mapped_serv else 0.0
+    jobs_df_clean['Title'] = raw_jobs_df[mapped_title].fillna('').astype(str) if mapped_title else ''
+    jobs_df_clean['Tags'] = raw_jobs_df[mapped_tags].fillna('').astype(str) if mapped_tags else ''
+    jobs_df_clean['Status'] = raw_jobs_df[mapped_status].fillna('').astype(str) if mapped_status else ''
+    jobs_df_clean['Zip Code'] = raw_jobs_df[mapped_zip].fillna('').astype(str) if mapped_zip else ''
+    jobs_df_clean['Related Invoices'] = raw_jobs_df[mapped_rel_inv].fillna('').astype(str) if mapped_rel_inv else ''
+    jobs_df_clean['#ID'] = raw_jobs_df[mapped_id].fillna('').astype(str) if mapped_id else raw_jobs_df.index.astype(str)
+
+    # Re-apply tracking columns dynamically for custom timestamp lookups
+    for col in raw_jobs_df.columns:
+        if 'timestamp' in str(col).lower():
+            jobs_df_clean[col] = raw_jobs_df[col]
+
+    # Filter for active target business units
+    jobs_df = jobs_df_clean[jobs_df_clean['Business Unit'].str.contains('Water Heaters|Simple Installs', case=False, na=False)].copy()
+
+    # Split multi-tech entries to primary tech
+    jobs_df['Assigned Team Members'] = jobs_df['Assigned Team Members'].astype(str).str.split(',').str[0].str.strip()
+    jobs_df['Assigned Team Members'] = jobs_df['Assigned Team Members'].replace(['nan', 'None', ''], None)
 
     column_headers = jobs_df.columns.tolist()
     jobs_df['Custom Ticket Hours'] = jobs_df.apply(lambda r: compute_custom_ticket_hours(r, column_headers), axis=1)
     jobs_df['Work Date'] = jobs_df.apply(lambda r: compute_job_date(r, column_headers), axis=1)
 
-    if 'Profit Margin' in invoices_df.columns:
-        invoices_df['Profit Margin'] = pd.to_numeric(invoices_df['Profit Margin'], errors='coerce').fillna(0.0)
+    # --- AUTO-MAPPING FOR INVOICES CSV ---
+    inv_cols = list(invoices_df.columns)
+    inv_id_col = auto_map_column(['#id', 'invoice id', 'id', 'invoice number'], inv_cols)
+    inv_prof_col = auto_map_column(['profit margin', 'margin', 'net profit'], inv_cols)
+    
+    if inv_id_col and inv_id_col != '#ID':
+        invoices_df['#ID'] = invoices_df[inv_id_col]
+    if inv_prof_col:
+        invoices_df['Profit Margin'] = sanitize_numeric_series(invoices_df[inv_prof_col])
+    else:
+        invoices_df['Profit Margin'] = 0.0
 
     # Calculate dynamic scope window from timesheet dates
     valid_ts_dates = timesheets_df['Work Date'].dropna()
@@ -407,7 +499,6 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
                     wh_jobs['Is Exemption'] = wh_jobs.apply(check_is_exemption, axis=1)
                     wh_jobs['Stream Type'] = np.where(wh_jobs['Is Exemption'], "Program Exemption (LA/PA/RA)", "Standard Retail")
                     
-                    # Compute granular team cost burdens for the segmentations
                     wh_stream_summary = wh_jobs.groupby('Stream Type').agg(
                         Total_Jobs=('Status', 'count'),
                         Gross_Revenue=('Total Invoice Amount', 'sum'),
@@ -415,7 +506,6 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
                         Labor_Costs=('Labor Cost', 'sum')
                     ).reset_index()
                     
-                    # FIXED: Mismatch between 'Gross_Revenue' and 'Gross Revenue' key call
                     wh_stream_summary['Net Profit'] = wh_stream_summary['Gross_Revenue'] - wh_stream_summary['Material_Costs'] - wh_stream_summary['Labor_Costs']
                     wh_stream_summary['Avg Profit / Job'] = wh_stream_summary['Net Profit'] / wh_stream_summary['Total_Jobs']
                     
@@ -432,13 +522,11 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
                 st.caption("Flags standard retail water heater installations where the final processed invoice deviates from the required contract value (85% of original estimate).")
                 
                 if not wh_jobs.empty:
-                    # Filter down strictly to standard jobs where quotes and final values exist
                     wh_standard = wh_jobs[(wh_jobs['Total Estimate Amount'] > 0) & (wh_jobs['Total Invoice Amount'] > 0) & (~wh_jobs['Is Exemption'])].copy()
                     
                     wh_standard['Expected Invoice'] = wh_standard['Total Estimate Amount'] * 0.85
                     wh_standard['Contract Variance'] = wh_standard['Total Invoice Amount'] - wh_standard['Expected Invoice']
                     
-                    # Flag anomalies where variance exceeds a $1 tolerance envelope
                     wh_anomalies = wh_standard[wh_standard['Contract Variance'].abs() > 1.00].copy()
                     
                     if not wh_anomalies.empty:
