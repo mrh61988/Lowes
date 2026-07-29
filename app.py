@@ -35,6 +35,25 @@ def sanitize_numeric_series(series):
     return pd.to_numeric(cleaned, errors='coerce').fillna(0.0)
 
 # ---------------------------------------------------------
+# HIGH-FIDELITY LOCAL GEOGRAPHIC SEED DICTIONARY (ARIZONA)
+# ---------------------------------------------------------
+AZ_ZIP_COORDINATES = {
+    '85258': (33.5634, -111.8927), '85750': (32.2980, -110.8449), 
+    '86426': (35.0134, -114.5497), '85286': (33.2715, -111.8316), 
+    '85251': (33.4936, -111.9167), '85741': (32.3472, -111.0419), 
+    '85745': (32.2434, -111.0179), '85138': (33.0073, -111.9324), 
+    '85143': (33.1911, -111.5280), '85308': (33.6539, -112.1694), 
+    '85142': (33.2487, -111.6343), '85204': (33.3992, -111.7896), 
+    '85042': (33.3794, -112.0283), '85326': (33.3519, -112.5908), 
+    '85335': (33.6082, -112.3241), '85224': (33.3301, -111.8632), 
+    '85297': (33.2781, -111.7096), '85044': (33.3291, -111.9943), 
+    '85736': (31.9011, -111.3702), '85255': (33.6860, -111.9020),
+    '85260': (33.6000, -111.8900), '85032': (33.6150, -112.0100),
+    '85304': (33.6100, -112.1800), '85281': (33.4200, -111.9300),
+    '85710': (32.2200, -110.8300), '85712': (32.2500, -110.8900)
+}
+
+# ---------------------------------------------------------
 # DYNAMIC GEOJSON REGIONAL BOUNDARY INGESTION ENGINE
 # ---------------------------------------------------------
 @st.cache_data(ttl=604800, show_spinner=False)
@@ -42,11 +61,34 @@ def load_regional_geojson_boundaries():
     """Streams minified geometric boundary vectors for localized Arizona postal code grids."""
     url = "https://raw.githubusercontent.com/OpenDataDE/State-zip-code-GeoJSON/master/az_arizona_zip_codes_geo.min.json"
     try:
-        req = urllib.request.Request(url, headers={'User-Agent': 'OpsCode_GeoEngine/6.0'})
+        req = urllib.request.Request(url, headers={'User-Agent': 'OpsCode_GeoEngine/7.0'})
         with urllib.request.urlopen(req, timeout=12) as response:
             return json.loads(response.read().decode())
     except Exception:
         return None
+
+# ---------------------------------------------------------
+# HIGH-PERFORMANCE CACHED STREET-LEVEL GEOCODING UTILITY
+# ---------------------------------------------------------
+@st.cache_data(ttl=604800, show_spinner=False)
+def geocode_address_string(address_str):
+    """Converts street address strings into absolute coordinate primitives via open API queries."""
+    if not address_str or len(str(address_str).strip()) < 6 or str(address_str).lower() == 'nan':
+        return None
+    query_string = str(address_str).strip()
+    if not any(state in query_string.upper() for state in [', AZ', ' ARIZONA']):
+        query_string += ", AZ"
+    encoded_query = urllib.parse.quote(query_string)
+    url = f"https://nominatim.openstreetmap.org/search?q={encoded_query}&format=json&limit=1"
+    try:
+        req = urllib.request.Request(url, headers={'User-Agent': 'OpsManagerDashboard_Geomap/7.0'})
+        with urllib.request.urlopen(req, timeout=4) as response:
+            data = json.loads(response.read().decode())
+            if data:
+                return float(data[0]['lat']), float(data[0]['lon'])
+    except Exception:
+        pass
+    return None
 
 # ---------------------------------------------------------
 # RESILIENT AUTOMATIC COLUMN SCANNING ENGINE
@@ -216,6 +258,7 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
     mapped_tags = auto_map_column(['tags', 'label', 'work type'], job_cols_list)
     mapped_status = auto_map_column(['status', 'job status', 'state'], job_cols_list)
     mapped_zip = auto_map_column(['zip code', 'zip', 'postal'], job_cols_list)
+    mapped_address = auto_map_column(['street address', 'address', 'full address', 'job address', 'location', 'site address'], job_cols_list)
     mapped_rel_inv = auto_map_column(['related invoices', 'invoice id', 'related invoice', 'invoice #'], job_cols_list)
     mapped_id = auto_map_column(['#id', 'job id', 'ticket number', 'id', 'wo #'], job_cols_list)
 
@@ -232,13 +275,13 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
     jobs_df_clean['Tags'] = raw_jobs_df[mapped_tags].fillna('').astype(str) if mapped_tags else ''
     jobs_df_clean['Status'] = raw_jobs_df[mapped_status].fillna('').astype(str) if mapped_status else ''
     jobs_df_clean['Zip Code'] = raw_jobs_df[mapped_zip].fillna('').astype(str) if mapped_zip else ''
+    jobs_df_clean['Full Address'] = raw_jobs_df[mapped_address].fillna('').astype(str) if mapped_address else ''
     jobs_df_clean['Related Invoices'] = raw_jobs_df[mapped_rel_inv].fillna('').astype(str) if mapped_rel_inv else ''
     jobs_df_clean['#ID'] = raw_jobs_df[mapped_id].fillna('').astype(str) if mapped_id else raw_jobs_df.index.astype(str)
 
     for col in raw_jobs_df.columns:
         if 'timestamp' in str(col).lower(): jobs_df_clean[col] = raw_jobs_df[col]
 
-    # COMPREHENSIVE REGEX PATTERN MATCH TO RETAIN ALL DATA VARIANTS (Singular/Plural)
     jobs_df = jobs_df_clean[jobs_df_clean['Business Unit'].str.contains('Water Heater|Simple Install', case=False, na=False)].copy()
     jobs_df['Assigned Team Members'] = jobs_df['Assigned Team Members'].astype(str).str.split(',').str[0].str.strip().replace(['nan', 'None', ''], 'Unassigned')
 
@@ -281,7 +324,7 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
             st.dataframe(fin_metrics.style.format({'Total_Revenue': '${:,.2f}'}), use_container_width=True, hide_index=True)
 
     # ---------------------------------------------------------
-    # TAB 3: GEOGRAPHIC PERFORMANCE (ZERO-LOSS DATA MAPPER WITH TEXT OVERLAYS)
+    # TAB 3: GEOGRAPHIC PERFORMANCE (MULTI-LAYER CHOROPLETH + TEXT OVERLAY + STREET-LEVEL ADDRESS DOTS)
     # ---------------------------------------------------------
     with tab3:
         st.header("Geographic Profitability & Travel Time Analysis")
@@ -294,10 +337,35 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
 
         if not geo_df.empty:
             st.subheader("🗺️ Regional Density Choropleth Map")
-            st.write("Shaded by localized transactional density. **Dark maroon patches call out top tier volume locations**.")
+            st.write("Shaded areas track high-volume zip codes. **Blue pins showcase the exact street address geolocations of individual tickets**.")
             
-            # Map volumes to dictionary for quick cross referencing
-            zip_geo_counts = geo_df.groupby('Zip Code').size().reset_index(name='Job_Count')
+            # --- HIGH-FIDELITY HYBRID GEOLOCATION PIPELINE ---
+            with st.spinner("Resolving street addresses to precise geo-coordinates..."):
+                def resolve_exact_coordinates(row):
+                    addr = str(row.get('Full Address', '')).strip()
+                    # Step 1: Attempt to process explicit street address geocoding
+                    if addr and addr.lower() != 'nan' and len(addr) > 5:
+                        coords = geocode_address_string(addr)
+                        if coords:
+                            return coords[0], coords[1]
+                    
+                    # Step 2: Fallback to static seed lookup dictionary if street fail matches
+                    z_code = str(row.get('Zip Code', '')).strip()
+                    if z_code in AZ_ZIP_COORDINATES:
+                        return AZ_ZIP_COORDINATES[z_code]
+                        
+                    return np.nan, np.nan
+
+                # Apply mapping layout coordinates
+                geo_df['coords_tuple'] = geo_df.apply(resolve_exact_coordinates, axis=1)
+                geo_df['latitude'] = geo_df['coords_tuple'].map(lambda x: x[0])
+                geo_df['longitude'] = geo_df['coords_tuple'].map(lambda x: x[1])
+            
+            # Drop entries completely unable to compile spatial variables
+            map_clean_df = geo_df.dropna(subset=['latitude', 'longitude']).copy()
+            
+            # Aggregate totals per zip zone for boundary layer distribution maps
+            zip_geo_counts = map_clean_df.groupby('Zip Code').size().reset_index(name='Job_Count')
             max_jobs = max(1, zip_geo_counts['Job_Count'].max())
             zip_counts_dict = zip_geo_counts.set_index('Zip Code')['Job_Count'].to_dict()
             
@@ -307,16 +375,14 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
                 features_to_render = []
                 text_overlay_data = []
                 
-                # HIGH-CONTRAST EXPONENTIAL POWER GRADIENT COLOR SCALE
+                # HIGH-CONTRAST EXPONENTIAL GRADIENT COLOR SCALE
                 def get_high_contrast_red_ramp(count, max_val):
                     if max_val <= 1:
                         ratio = 1.0
                     else:
                         ratio = (count - 1) / (max_val - 1) if max_val > 1 else 0.0
-                        ratio = ratio ** 0.7  # Accentuates visual differences among lower numbers
+                        ratio = ratio ** 0.7  # Expands visual variance in low-mid tier shifts
                     
-                    # 1 Job = Very pale, transparent red tint
-                    # Max Jobs = Dense, bold, deep dark maroon blood-red
                     r = int(255 - (ratio * (255 - 139)))
                     g = int(185 - (ratio * 185))
                     b = int(185 - (ratio * 185))
@@ -340,7 +406,7 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
                         feature['properties']['job_volume'] = int(count)
                         features_to_render.append(feature)
                         
-                        # DYNAMIC CENTROID EXTRACTION ENGINE: Pulls geometry centers on the fly
+                        # Generate text anchors via spatial geometry polygons on the fly
                         geom = feature.get('geometry', {})
                         g_type = geom.get('type', '')
                         coords = geom.get('coordinates', [])
@@ -370,7 +436,7 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
                     filtered_geojson = {"type": "FeatureCollection", "features": features_to_render}
                     text_overlay_df = pd.DataFrame(text_overlay_data)
                     
-                    # LAYER 1: Dynamic Vector Shading Boundary Layer
+                    # LAYER 1: Translucent Regional Boundary Choropleth Layer
                     choropleth_layer = pdk.Layer(
                         "GeoJsonLayer",
                         filtered_geojson,
@@ -385,7 +451,7 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
                         pickable=True
                     )
                     
-                    # LAYER 2: Text Value Overlay Layer
+                    # LAYER 2: Heavy Text Value Overlay Layer Centered inside Polygon
                     text_layer = pdk.Layer(
                         "TextLayer",
                         text_overlay_df,
@@ -400,15 +466,49 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
                         font_family="'Arial, sans-serif'"
                     )
                     
+                    # LAYER 3: NEW Precision Street Address Dot Matrix Scatter Layer
+                    # Clean strings to prevent pydeck from breaking on formatting values
+                    map_clean_df['tip_title'] = map_clean_df['Title'].astype(str).str.replace('"', '')
+                    map_clean_df['tip_tech'] = map_clean_df['Assigned Team Members'].astype(str)
+                    map_clean_df['tip_addr'] = map_clean_df['Full Address'].astype(str).str.replace('"', '')
+                    
+                    scatterplot_layer = pdk.Layer(
+                        "ScatterplotLayer",
+                        map_clean_df,
+                        get_position="[longitude, latitude]",
+                        get_color=[0, 90, 255, 230],       # Electric blue dots piercing the red fields
+                        get_line_color=[255, 255, 255, 255], # Crisp white perimeter borders
+                        get_radius=35,
+                        radius_min_pixels=4.5,            # Highly visible across any scaling configuration
+                        radius_max_pixels=12,
+                        stroked=True,
+                        filled=True,
+                        line_width_min_pixels=1,
+                        pickable=True
+                    )
+                    
+                    # Generate view dimensions framework 
                     st.pydeck_chart(pdk.Deck(
-                        layers=[choropleth_layer, text_layer],
+                        # Multi-layered stack sequence
+                        layers=[choropleth_layer, text_layer, scatterplot_layer],
                         initial_view_state=pdk.ViewState(
-                            latitude=text_overlay_df['latitude'].mean() if not text_overlay_df.empty else 33.45,
-                            longitude=text_overlay_df['longitude'].mean() if not text_overlay_df.empty else -112.07,
-                            zoom=9.3, pitch=0
+                            latitude=map_clean_df['latitude'].mean() if not map_clean_df.empty else 33.45,
+                            longitude=map_clean_df['longitude'].mean() if not map_clean_df.empty else -112.07,
+                            zoom=9.5, pitch=0
                         ),
                         map_style=pdk.map_styles.CARTO_ROAD,
-                        tooltip={"text": "Zip Area: {zip_label}\nVolume: {job_volume} Tickets"}
+                        tooltip={
+                            "html": """
+                                <b>Pinpoint Ticket Details</b><br/>
+                                <b>Job:</b> {tip_title}<br/>
+                                <b>Tech:</b> {tip_tech}<br/>
+                                <b>Address:</b> {tip_addr}<br/>
+                                <b>Value:</b> ${Total Invoice Amount}<br/>
+                                <hr style='margin: 5px 0;'/>
+                                <i>Hovering Zone Registry: {Zip Code}</i>
+                            """,
+                            "style": {"backgroundColor": "maroon", "color": "white", "fontFamily": "Arial"}
+                        }
                     ))
                 else:
                     st.warning("Uploaded file records are valid but no postal zip matches intersected the state boundaries coordinate registry.")
@@ -417,7 +517,7 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
                 
             st.markdown("---")
             
-            # --- METRICS TABLES (Zero data elements dropped) ---
+            # --- METRICS TABLES ---
             col3, col4 = st.columns(2)
             with col3:
                 st.subheader("💰 Most Lucrative Zip Codes (Net Profit)")
