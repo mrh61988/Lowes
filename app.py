@@ -30,16 +30,49 @@ def sanitize_numeric_series(series):
     return pd.to_numeric(cleaned, errors='coerce').fillna(0.0)
 
 # ---------------------------------------------------------
+# HIGH-FIDELITY LOCAL GEOGRAPHIC SEED DICTIONARY
+# ---------------------------------------------------------
+AZ_ZIP_COORDINATES = {
+    '85258': (33.5634, -111.8927), # Scottsdale
+    '85750': (32.2980, -110.8449), # Tucson
+    '86426': (35.0134, -114.5497), # Fort Mohave
+    '85286': (33.2715, -111.8316), # Chandler/Gilbert
+    '85251': (33.4936, -111.9167), # Scottsdale
+    '85741': (32.3472, -111.0419), # Tucson
+    '85745': (32.2434, -111.0179), # Tucson
+    '85138': (33.0073, -111.9324), # Maricopa
+    '85143': (33.1911, -111.5280), # San Tan Valley
+    '85308': (33.6539, -112.1694), # Glendale
+    '85142': (33.2487, -111.6343), # Queen Creek
+    '85204': (33.3992, -111.7896), # Mesa
+    '85042': (33.3794, -112.0283), # Phoenix
+    '85326': (33.3519, -112.5908), # Buckeye
+    '85335': (33.6082, -112.3241), # El Mirage
+    '85224': (33.3301, -111.8632), # Chandler
+    '85297': (33.2781, -111.7096), # Gilbert
+    '85044': (33.3291, -111.9943), # Phoenix
+    '85736': (31.9011, -111.3702), # Tucson
+}
+
+@st.cache_data(ttl=86400)
+def fetch_extended_zip_database():
+    """Downloads a public, lightweight US zip code map lookup as a fallback network option."""
+    try:
+        url = "https://raw.githubusercontent.com/jefftune/US-Zip-Codes-with-Lat-And-Long/master/US%20Zip%20Codes%20from%202013%20Government%20Data.txt"
+        df = pd.read_csv(url, sep=',', dtype={'ZIP': str})
+        return df.set_index('ZIP')[['LAT', 'LNG']].to_dict('index')
+    except:
+        return {}
+
+# ---------------------------------------------------------
 # RESILIENT AUTOMATIC COLUMN SCANNING ENGINE
 # ---------------------------------------------------------
 def auto_map_column(keys, columns, exclude_keys=None):
     """Scans variations of column names using prioritized exact and wildcard matches."""
     columns_lower = [str(c).lower().strip() for c in columns]
-    # Priority 1: Direct exact match match
     for k in keys:
         if k in columns_lower:
             return columns[columns_lower.index(k)]
-    # Priority 2: Safe contextual wildcard match
     for k in keys:
         for col in columns:
             col_lower = str(col).lower()
@@ -47,7 +80,6 @@ def auto_map_column(keys, columns, exclude_keys=None):
                 if exclude_keys and any(ex in col_lower for ex in exclude_keys):
                     continue
                 return col
-    # Priority 3: Fallback matching
     for k in keys:
         for col in columns:
             if k in str(col).lower():
@@ -58,13 +90,7 @@ def auto_map_column(keys, columns, exclude_keys=None):
 # DYNAMIC ON-TICKET TIME CALCULATOR ENGINE
 # ---------------------------------------------------------
 def compute_custom_ticket_hours(row, cols):
-    """
-    Calculates ticket duration based on workflow status timestamps.
-    Start Time: Earliest of 'On The Way', 'Lowes Store', or 'In Progress'.
-    End Time: 'Pending Audit'.
-    Edge Case 1: Missing start data defaults to 2.0 hours.
-    Edge Case 2: Multiple visits select the absolute earliest start milestone.
-    """
+    """Calculates ticket duration based on workflow status timestamps."""
     start_times = []
     end_times = []
     
@@ -74,14 +100,12 @@ def compute_custom_ticket_hours(row, cols):
             continue
             
         col_clean = str(col_name).lower()
-        # Target Start Milestones
         if 'on the way' in col_clean or 'lowes store' in col_clean or 'in progress' in col_clean:
             if 'start timestamp' in col_clean:
                 t = pd.to_datetime(val, errors='coerce')
                 if pd.notna(t):
                     start_times.append(t)
                 
-        # Target End Milestone
         if 'pending audit' in col_clean and 'start timestamp' in col_clean:
             t = pd.to_datetime(val, errors='coerce')
             if pd.notna(t):
@@ -595,12 +619,11 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
             st.warning("No completed financial data available to build margins.")
 
     # ---------------------------------------------------------
-    # TAB 3: Geographic Performance (FIXED & AUDITED)
+    # TAB 3: Geographic Performance (WITH INTERACTIVE MAP LAYER)
     # ---------------------------------------------------------
     with tab3:
         st.header("Geographic Profitability & Travel Time Analysis")
         
-        # Fixed: Shifted to a safe Left Join with structural clean suffixes to prevent column name string drops
         if 'Related Invoices' in jobs_df.columns and '#ID' in invoices_df.columns:
             jobs_df['Related Invoices'] = jobs_df['Related Invoices'].astype(str).str.split('.').str[0].str.strip()
             invoices_df['#ID'] = invoices_df['#ID'].astype(str).str.split('.').str[0].str.strip()
@@ -611,18 +634,45 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
         if 'Assigned Team Members' in geo_df.columns:
             geo_df = geo_df.dropna(subset=['Assigned Team Members'])
 
-        # Sanitize and scrub messy string or decimal formatting artifacts out of Zip Code column values
         if 'Zip Code' in geo_df.columns:
             geo_df['Zip Code'] = geo_df['Zip Code'].astype(str).str.strip().str.replace(r'\.0$', '', regex=True)
             geo_df = geo_df[(geo_df['Zip Code'] != 'nan') & (geo_df['Zip Code'] != '') & (geo_df['Zip Code'] != 'None')]
             
-        # Ensure data table layout executes conditionally only when geographical vectors are actually parsed
         if 'Zip Code' in geo_df.columns and not geo_df.empty:
+            
+            # --- MAP VISUALIZATION LAYER ---
+            st.subheader("🗺️ Operational Area Heatmap")
+            st.write("Visual distribution of service tickets. Highlights concentration zones across your operating region.")
+            
+            extended_db = fetch_extended_zip_database()
+            
+            map_records = []
+            for _, row in geo_df.iterrows():
+                z_code = str(row['Zip Code']).strip().zfill(5)
+                if z_code in AZ_ZIP_COORDINATES:
+                    lat, lon = AZ_ZIP_COORDINATES[z_code]
+                elif z_code in extended_db:
+                    try:
+                        lat = float(extended_db[z_code]['LAT'])
+                        lon = float(extended_db[z_code]['LNG'])
+                    except:
+                        continue
+                else:
+                    continue
+                map_records.append({'lat': lat, 'lon': lon})
+                
+            if map_records:
+                map_df = pd.DataFrame(map_records).dropna()
+                st.map(map_df)
+            else:
+                st.warning("Coordinates could not be located for the parsed zip codes. Map layer skipped.")
+                
+            st.markdown("---")
+            
+            # --- METRICS TABLES ---
             col3, col4 = st.columns(2)
             with col3:
                 st.subheader("💰 Most Lucrative Zip Codes (Net Profit)")
-                
-                # Dynamic Fallback Protection: Use calculated labor profit if invoice-level profit margin column is empty
                 profit_col = 'Profit Margin' if ('Profit Margin' in geo_df.columns and geo_df['Profit Margin'].sum() != 0) else 'Net Gross Profit'
                 
                 profit_by_zip = geo_df.groupby('Zip Code').agg(
