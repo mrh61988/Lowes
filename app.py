@@ -21,7 +21,7 @@ def format_hours_mins(decimal_hours):
     """Converts a decimal hour value (e.g., 1.25) into an H:MM string format (e.g., 1:15)"""
     if pd.isna(decimal_hours) or decimal_hours is None:
         return "-"
-    total_minutes = int(round(decimal_hours * 60))
+    total_minutes = int(round(float(decimal_hours) * 60))
     hours = total_minutes // 60
     minutes = total_minutes % 60
     return f"{hours}:{minutes:02d}"
@@ -35,25 +35,6 @@ def sanitize_numeric_series(series):
     return pd.to_numeric(cleaned, errors='coerce').fillna(0.0)
 
 # ---------------------------------------------------------
-# HIGH-FIDELITY LOCAL GEOGRAPHIC SEED DICTIONARY (ARIZONA)
-# ---------------------------------------------------------
-AZ_ZIP_COORDINATES = {
-    '85258': (33.5634, -111.8927), '85750': (32.2980, -110.8449), 
-    '86426': (35.0134, -114.5497), '85286': (33.2715, -111.8316), 
-    '85251': (33.4936, -111.9167), '85741': (32.3472, -111.0419), 
-    '85745': (32.2434, -111.0179), '85138': (33.0073, -111.9324), 
-    '85143': (33.1911, -111.5280), '85308': (33.6539, -112.1694), 
-    '85142': (33.2487, -111.6343), '85204': (33.3992, -111.7896), 
-    '85042': (33.3794, -112.0283), '85326': (33.3519, -112.5908), 
-    '85335': (33.6082, -112.3241), '85224': (33.3301, -111.8632), 
-    '85297': (33.2781, -111.7096), '85044': (33.3291, -111.9943), 
-    '85736': (31.9011, -111.3702), '85255': (33.6860, -111.9020),
-    '85260': (33.6000, -111.8900), '85032': (33.6150, -112.0100),
-    '85304': (33.6100, -112.1800), '85281': (33.4200, -111.9300),
-    '85710': (32.2200, -110.8300), '85712': (32.2500, -110.8900)
-}
-
-# ---------------------------------------------------------
 # DYNAMIC GEOJSON REGIONAL BOUNDARY INGESTION ENGINE
 # ---------------------------------------------------------
 @st.cache_data(ttl=604800, show_spinner=False)
@@ -61,7 +42,7 @@ def load_regional_geojson_boundaries():
     """Streams minified geometric boundary vectors for localized Arizona postal code grids."""
     url = "https://raw.githubusercontent.com/OpenDataDE/State-zip-code-GeoJSON/master/az_arizona_zip_codes_geo.min.json"
     try:
-        req = urllib.request.Request(url, headers={'User-Agent': 'OpsCode_GeoEngine/7.0'})
+        req = urllib.request.Request(url, headers={'User-Agent': 'OpsCode_GeoEngine/8.0'})
         with urllib.request.urlopen(req, timeout=12) as response:
             return json.loads(response.read().decode())
     except Exception:
@@ -81,7 +62,7 @@ def geocode_address_string(address_str):
     encoded_query = urllib.parse.quote(query_string)
     url = f"https://nominatim.openstreetmap.org/search?q={encoded_query}&format=json&limit=1"
     try:
-        req = urllib.request.Request(url, headers={'User-Agent': 'OpsManagerDashboard_Geomap/7.0'})
+        req = urllib.request.Request(url, headers={'User-Agent': 'OpsManagerDashboard_Geomap/8.0'})
         with urllib.request.urlopen(req, timeout=4) as response:
             data = json.loads(response.read().decode())
             if data:
@@ -155,11 +136,9 @@ def compute_job_date(row, cols):
 # ---------------------------------------------------------
 def calculate_job_labor_cost(row):
     tech = str(row['Assigned Team Members'])
-    duration = row['Custom Ticket Hours']
-    revenue = row['Total Invoice Amount']
+    duration = float(row['Custom Ticket Hours'])
+    revenue = float(row['Total Invoice Amount'])
     bu = str(row['Business Unit'])
-    if pd.isna(duration): duration = 0.0
-    if pd.isna(revenue): revenue = 0.0
     
     if tech == 'Sean Marble': return duration * (70000 / 2080)
     elif tech == 'Mathew Hodges': return duration * (65000 / 2080)
@@ -179,10 +158,8 @@ def calculate_job_labor_cost(row):
 def calculate_job_material_cost(row):
     tech = str(row['Assigned Team Members']).lower()
     bu = str(row['Business Unit']).lower()
-    prod_cost = pd.to_numeric(row['Invoice - Total Product Cost'], errors='coerce')
-    serv_cost = pd.to_numeric(row['Invoice - Total Service Cost'], errors='coerce')
-    if pd.isna(prod_cost): prod_cost = 0.0
-    if pd.isna(serv_cost): serv_cost = 0.0
+    prod_cost = float(row['Invoice - Total Product Cost'])
+    serv_cost = float(row['Invoice - Total Service Cost'])
     base_mat = prod_cost + serv_cost
     is_contractor = any(k in tech for k in ['contractor', 'contactor', 'llc', 'ken', 'barber', 'wrench', 'wrentch', 'presidio', 'indian'])
     if is_contractor:
@@ -292,7 +269,10 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
     # --- AUTO-MAPPING FOR INVOICES CSV ---
     inv_cols = list(invoices_df.columns)
     inv_id_col = auto_map_column(['#id', 'invoice id', 'id', 'invoice number'], inv_cols)
+    inv_prof_col = auto_map_column(['profit margin', 'margin', 'net profit', 'profit'], inv_cols)
+    
     if inv_id_col and inv_id_col != '#ID': invoices_df['#ID'] = invoices_df[inv_id_col]
+    invoices_df['Profit Margin'] = sanitize_numeric_series(invoices_df[inv_prof_col]) if inv_prof_col else 0.0
 
     valid_ts_dates = timesheets_df['Work Date'].dropna()
     days_span = (max(valid_ts_dates) - min(valid_ts_dates)).days + 1 if not valid_ts_dates.empty else 7
@@ -312,6 +292,8 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
                 Total_Jobs_Completed=('Status', 'count'), Avg_Duration_Hours=('Custom Ticket Hours', 'mean'),
                 Total_Revenue_Generated=('Total Invoice Amount', 'sum'), Avg_Revenue_Per_Job=('Total Invoice Amount', 'mean')
             ).reset_index().sort_values('Total_Jobs_Completed', ascending=False)
+            
+            tech_metrics['Total_Revenue_Generated'] = tech_metrics['Total_Revenue_Generated'].astype(float)
             st.dataframe(tech_metrics.style.format({'Total_Revenue_Generated': '${:,.2f}'}), use_container_width=True, hide_index=True)
 
     with tab2:
@@ -321,10 +303,12 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
                 Jobs_Completed=('Status', 'count'), Total_Revenue=('Total Invoice Amount', 'sum'),
                 Total_Material_Cost=('Material Cost', 'sum'), Total_Labor_Cost_Jobs=('Labor Cost', 'sum')
             ).reset_index()
+            
+            fin_metrics['Total_Revenue'] = fin_metrics['Total_Revenue'].astype(float)
             st.dataframe(fin_metrics.style.format({'Total_Revenue': '${:,.2f}'}), use_container_width=True, hide_index=True)
 
     # ---------------------------------------------------------
-    # TAB 3: GEOGRAPHIC PERFORMANCE (MULTI-LAYER CHOROPLETH + TEXT OVERLAY + STREET-LEVEL ADDRESS DOTS)
+    # TAB 3: GEOGRAPHIC PERFORMANCE (STABILIZED MULTI-LAYER PIPELINE)
     # ---------------------------------------------------------
     with tab3:
         st.header("Geographic Profitability & Travel Time Analysis")
@@ -335,36 +319,33 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
             geo_df['Zip Code'] = geo_df['Zip Code'].astype(str).str.strip().str.replace(r'\.0$', '', regex=True).str.zfill(5)
             geo_df = geo_df[(geo_df['Zip Code'] != '00nan') & (geo_df['Zip Code'] != '00000') & (geo_df['Zip Code'] != '0None')]
 
+        # Guarantee source financial vectors are strictly numeric floats to secure downstream grouping tasks
+        if 'Profit Margin' in geo_df.columns:
+            geo_df['Profit Margin'] = pd.to_numeric(geo_df['Profit Margin'], errors='coerce').fillna(0.0)
+        geo_df['Net Gross Profit'] = pd.to_numeric(geo_df['Net Gross Profit'], errors='coerce').fillna(0.0)
+
         if not geo_df.empty:
             st.subheader("🗺️ Regional Density Choropleth Map")
-            st.write("Shaded areas track high-volume zip codes. **Blue pins showcase the exact street address geolocations of individual tickets**.")
+            st.write("Shaded areas track high-volume zip codes. Blue pins showcase exact address geolocations.")
             
-            # --- HIGH-FIDELITY HYBRID GEOLOCATION PIPELINE ---
             with st.spinner("Resolving street addresses to precise geo-coordinates..."):
                 def resolve_exact_coordinates(row):
                     addr = str(row.get('Full Address', '')).strip()
-                    # Step 1: Attempt to process explicit street address geocoding
                     if addr and addr.lower() != 'nan' and len(addr) > 5:
                         coords = geocode_address_string(addr)
                         if coords:
                             return coords[0], coords[1]
                     
-                    # Step 2: Fallback to static seed lookup dictionary if street fail matches
                     z_code = str(row.get('Zip Code', '')).strip()
                     if z_code in AZ_ZIP_COORDINATES:
                         return AZ_ZIP_COORDINATES[z_code]
-                        
                     return np.nan, np.nan
 
-                # Apply mapping layout coordinates
                 geo_df['coords_tuple'] = geo_df.apply(resolve_exact_coordinates, axis=1)
                 geo_df['latitude'] = geo_df['coords_tuple'].map(lambda x: x[0])
                 geo_df['longitude'] = geo_df['coords_tuple'].map(lambda x: x[1])
             
-            # Drop entries completely unable to compile spatial variables
             map_clean_df = geo_df.dropna(subset=['latitude', 'longitude']).copy()
-            
-            # Aggregate totals per zip zone for boundary layer distribution maps
             zip_geo_counts = map_clean_df.groupby('Zip Code').size().reset_index(name='Job_Count')
             max_jobs = max(1, zip_geo_counts['Job_Count'].max())
             zip_counts_dict = zip_geo_counts.set_index('Zip Code')['Job_Count'].to_dict()
@@ -375,13 +356,12 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
                 features_to_render = []
                 text_overlay_data = []
                 
-                # HIGH-CONTRAST EXPONENTIAL GRADIENT COLOR SCALE
                 def get_high_contrast_red_ramp(count, max_val):
                     if max_val <= 1:
                         ratio = 1.0
                     else:
                         ratio = (count - 1) / (max_val - 1) if max_val > 1 else 0.0
-                        ratio = ratio ** 0.7  # Expands visual variance in low-mid tier shifts
+                        ratio = ratio ** 0.7
                     
                     r = int(255 - (ratio * (255 - 139)))
                     g = int(185 - (ratio * 185))
@@ -406,7 +386,6 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
                         feature['properties']['job_volume'] = int(count)
                         features_to_render.append(feature)
                         
-                        # Generate text anchors via spatial geometry polygons on the fly
                         geom = feature.get('geometry', {})
                         g_type = geom.get('type', '')
                         coords = geom.get('coordinates', [])
@@ -436,7 +415,6 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
                     filtered_geojson = {"type": "FeatureCollection", "features": features_to_render}
                     text_overlay_df = pd.DataFrame(text_overlay_data)
                     
-                    # LAYER 1: Translucent Regional Boundary Choropleth Layer
                     choropleth_layer = pdk.Layer(
                         "GeoJsonLayer",
                         filtered_geojson,
@@ -451,7 +429,6 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
                         pickable=True
                     )
                     
-                    # LAYER 2: Heavy Text Value Overlay Layer Centered inside Polygon
                     text_layer = pdk.Layer(
                         "TextLayer",
                         text_overlay_df,
@@ -466,8 +443,6 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
                         font_family="'Arial, sans-serif'"
                     )
                     
-                    # LAYER 3: NEW Precision Street Address Dot Matrix Scatter Layer
-                    # Clean strings to prevent pydeck from breaking on formatting values
                     map_clean_df['tip_title'] = map_clean_df['Title'].astype(str).str.replace('"', '')
                     map_clean_df['tip_tech'] = map_clean_df['Assigned Team Members'].astype(str)
                     map_clean_df['tip_addr'] = map_clean_df['Full Address'].astype(str).str.replace('"', '')
@@ -476,10 +451,10 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
                         "ScatterplotLayer",
                         map_clean_df,
                         get_position="[longitude, latitude]",
-                        get_color=[0, 90, 255, 230],       # Electric blue dots piercing the red fields
-                        get_line_color=[255, 255, 255, 255], # Crisp white perimeter borders
+                        get_color=[0, 90, 255, 230],
+                        get_line_color=[255, 255, 255, 255],
                         get_radius=35,
-                        radius_min_pixels=4.5,            # Highly visible across any scaling configuration
+                        radius_min_pixels=4.5,
                         radius_max_pixels=12,
                         stroked=True,
                         filled=True,
@@ -487,9 +462,7 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
                         pickable=True
                     )
                     
-                    # Generate view dimensions framework 
                     st.pydeck_chart(pdk.Deck(
-                        # Multi-layered stack sequence
                         layers=[choropleth_layer, text_layer, scatterplot_layer],
                         initial_view_state=pdk.ViewState(
                             latitude=map_clean_df['latitude'].mean() if not map_clean_df.empty else 33.45,
@@ -511,20 +484,23 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
                         }
                     ))
                 else:
-                    st.warning("Uploaded file records are valid but no postal zip matches intersected the state boundaries coordinate registry.")
-            else:
-                st.error("Boundary layout assets could not be streamed from cloud repositories.")
-                
+                    st.warning("No geographic boundaries found matching these data points.")
+            
             st.markdown("---")
             
-            # --- METRICS TABLES ---
+            # --- METRICS TABLES (TYPE STABILIZED) ---
             col3, col4 = st.columns(2)
             with col3:
                 st.subheader("💰 Most Lucrative Zip Codes (Net Profit)")
                 profit_col = 'Profit Margin' if ('Profit Margin' in geo_df.columns and geo_df['Profit Margin'].sum() != 0) else 'Net Gross Profit'
+                
                 profit_by_zip = geo_df.groupby('Zip Code').agg(
                     Job_Count=('Zip Code', 'count'), Total_Net_Profit=(profit_col, 'sum')
                 ).reset_index().sort_values('Total_Net_Profit', ascending=False)
+                
+                # STABILIZATION LAYER: Guarantee conversion to clean float series to deny text rendering issues
+                profit_by_zip['Total_Net_Profit'] = profit_by_zip['Total_Net_Profit'].astype(float)
+                
                 st.dataframe(profit_by_zip.style.format({'Total_Net_Profit': '${:,.2f}'}), use_container_width=True, hide_index=True)
             
             with col4:
@@ -533,6 +509,8 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
                     travel_waste = geo_df.groupby('Zip Code').agg(
                         Job_Count=('Zip Code', 'count'), Avg_Travel_Hours=('Travel Duration Decimal', 'mean')
                     ).reset_index().sort_values('Avg_Travel_Hours', ascending=False)
+                    
+                    travel_waste['Avg_Travel_Hours'] = travel_waste['Avg_Travel_Hours'].astype(float)
                     st.dataframe(travel_waste.style.format({'Avg_Travel_Hours': '{:.2f} hrs'}), use_container_width=True, hide_index=True)
                 else:
                     st.info("Travel tracking metrics are missing or empty in this upload layout stream.")
