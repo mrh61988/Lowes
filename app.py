@@ -35,6 +35,25 @@ def sanitize_numeric_series(series):
     return pd.to_numeric(cleaned, errors='coerce').fillna(0.0)
 
 # ---------------------------------------------------------
+# HIGH-FIDELITY LOCAL GEOGRAPHIC SEED DICTIONARY (ARIZONA)
+# ---------------------------------------------------------
+AZ_ZIP_COORDINATES = {
+    '85258': (33.5634, -111.8927), '85750': (32.2980, -110.8449), 
+    '86426': (35.0134, -114.5497), '85286': (33.2715, -111.8316), 
+    '85251': (33.4936, -111.9167), '85741': (32.3472, -111.0419), 
+    '85745': (32.2434, -111.0179), '85138': (33.0073, -111.9324), 
+    '85143': (33.1911, -111.5280), '85308': (33.6539, -112.1694), 
+    '85142': (33.2487, -111.6343), '85204': (33.3992, -111.7896), 
+    '85042': (33.3794, -112.0283), '85326': (33.3519, -112.5908), 
+    '85335': (33.6082, -112.3241), '85224': (33.3301, -111.8632), 
+    '85297': (33.2781, -111.7096), '85044': (33.3291, -111.9943), 
+    '85736': (31.9011, -111.3702), '85255': (33.6860, -111.9020),
+    '85260': (33.6000, -111.8900), '85032': (33.6150, -112.0100),
+    '85304': (33.6100, -112.1800), '85281': (33.4200, -111.9300),
+    '85710': (32.2200, -110.8300), '85712': (32.2500, -110.8900)
+}
+
+# ---------------------------------------------------------
 # HIGH-PERFORMANCE CACHED GEOCODING UTILITY
 # ---------------------------------------------------------
 @st.cache_data(ttl=604800, show_spinner=False)
@@ -56,7 +75,7 @@ def geocode_address_string(address_str):
     try:
         req = urllib.request.Request(
             url, 
-            headers={'User-Agent': 'OpsManagerDashboard_ProductionEngine/2.0 (operations@opsmanager.internal)'}
+            headers={'User-Agent': 'OpsManagerDashboard_ProductionEngine/3.0 (operations@opsmanager.internal)'}
         )
         with urllib.request.urlopen(req, timeout=4) as response:
             data = json.loads(response.read().decode())
@@ -539,7 +558,7 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
             st.warning("No completed financial data available to build margins.")
 
     # ---------------------------------------------------------
-    # TAB 3: Geographic Performance (VOLUME SHADED HEATMAP)
+    # TAB 3: Geographic Performance (RESILIENT DENSITY VISUALIZER)
     # ---------------------------------------------------------
     with tab3:
         st.header("Geographic Profitability & Travel Time Analysis")
@@ -554,91 +573,90 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
         if 'Assigned Team Members' in geo_df.columns:
             geo_df = geo_df.dropna(subset=['Assigned Team Members'])
 
+        # Sanitize Zip Codes to remove structural artifacts
         if 'Zip Code' in geo_df.columns:
-            geo_df['Zip Code'] = geo_df['Zip Code'].astype(str).str.strip().str.replace(r'\.0$', '', regex=True)
-            geo_df = geo_df[(geo_df['Zip Code'] != 'nan') & (geo_df['Zip Code'] != '') & (geo_df['Zip Code'] != 'None')]
+            geo_df['Zip Code'] = geo_df['Zip Code'].astype(str).str.strip().str.replace(r'\.0$', '', regex=True).str.zfill(5)
+            geo_df = geo_df[(geo_df['Zip Code'] != '00nan') & (geo_df['Zip Code'] != '00000') & (geo_df['Zip Code'] != '0None')]
 
-        if 'Full Address' in geo_df.columns:
-            geo_df['Full Address'] = geo_df['Full Address'].astype(str).str.strip()
-            geo_df = geo_df[(geo_df['Full Address'] != '') & (geo_df['Full Address'].str.lower() != 'nan')]
-
-        if 'Full Address' in geo_df.columns and not geo_df.empty:
+        if not geo_df.empty:
             st.subheader("🗺️ Zonal Density Shading Map")
-            st.write("Zip code regions shaded by total operational volume. **Darker red rings indicate higher concentrations of work orders**.")
             
-            # Extract unique address strings to optimize batch execution loops
-            unique_addresses = [a for a in geo_df['Full Address'].unique() if len(str(a).strip()) > 5]
+            # Initialize empty coordinate vectors
+            geo_df['latitude'] = np.nan
+            geo_df['longitude'] = np.nan
             
-            if unique_addresses:
-                address_coordinate_lookup = {}
-                progress_text = "Parsing operational maps... matching addresses."
-                geo_bar = st.progress(0.0, text=progress_text)
+            # --- ENGINE A: Primary Street Level Address Parsing ---
+            if 'Full Address' in geo_df.columns:
+                geo_df['Full Address'] = geo_df['Full Address'].astype(str).str.strip()
+                active_addresses = [a for a in geo_df['Full Address'].unique() if len(str(a).strip()) > 5 and str(a).lower() != 'nan']
                 
-                for index, addr in enumerate(unique_addresses):
-                    coords = geocode_address_string(addr)
-                    if coords:
-                        address_coordinate_lookup[addr] = coords
-                    if index % 3 == 0:
-                        time.sleep(0.1)
-                    fraction = (index + 1) / len(unique_addresses)
-                    geo_bar.progress(fraction, text=f"Processing property {index + 1} of {len(unique_addresses)}")
+                if active_addresses:
+                    address_map = {}
+                    p_bar = st.progress(0.0, text="Resolving property vectors...")
+                    for idx, addr in enumerate(active_addresses):
+                        coords = geocode_address_string(addr)
+                        if coords:
+                            address_map[addr] = coords
+                        if idx % 3 == 0:
+                            time.sleep(0.05)
+                        p_bar.progress((idx + 1) / len(active_addresses), text=f"Processing location {idx+1}/{len(active_addresses)}")
+                    p_bar.empty()
+                    
+                    geo_df['latitude'] = geo_df['Full Address'].map(lambda x: address_map.get(x, (np.nan, np.nan))[0])
+                    geo_df['longitude'] = geo_df['Full Address'].map(lambda x: address_map.get(x, (np.nan, np.nan))[1])
+
+            # --- ENGINE B: Automatic Secondary Zip Fallback ---
+            has_valid_street_coords = geo_df['latitude'].notna().any()
+            
+            if not has_valid_street_coords:
+                st.info("🔄 Address geocoding rate-limited or unavailable. Automatically plotting via internal Zip Code registry.")
+                geo_df['latitude'] = geo_df['Zip Code'].map(lambda x: AZ_ZIP_COORDINATES.get(x, (np.nan, np.nan))[0])
+                geo_df['longitude'] = geo_df['Zip Code'].map(lambda x: AZ_ZIP_COORDINATES.get(x, (np.nan, np.nan))[1])
+            
+            map_clean_df = geo_df.dropna(subset=['latitude', 'longitude']).copy()
+            
+            if not map_clean_df.empty:
+                # Group by zip zone to project uniform red-shaded concentration boundaries
+                zip_geo_counts = map_clean_df.groupby('Zip Code').agg(
+                    Job_Count=('Zip Code', 'count'),
+                    latitude=('latitude', 'mean'),
+                    longitude=('longitude', 'mean')
+                ).reset_index()
                 
-                geo_bar.empty()
+                max_jobs = max(1, zip_geo_counts['Job_Count'].max())
                 
-                geo_df['latitude'] = geo_df['Full Address'].map(lambda x: address_coordinate_lookup.get(x, (None, None))[0])
-                geo_df['longitude'] = geo_df['Full Address'].map(lambda x: address_coordinate_lookup.get(x, (None, None))[1])
-                map_render_df = geo_df.dropna(subset=['latitude', 'longitude']).copy()
+                def get_red_palette_ramp(count, max_val):
+                    ratio = min(1.0, count / max_val)
+                    # Low concentration = transparent tint; High concentration = solid crimson
+                    return [220, 30, 30, int(70 + (ratio * 165))]
                 
-                if not map_render_df.empty:
-                    # Group by Zip Code to calculate job volumes and establish geographic centers
-                    zip_geo_counts = map_render_df.groupby('Zip Code').agg(
-                        Job_Count=('Zip Code', 'count'),
-                        latitude=('latitude', 'mean'),
-                        longitude=('longitude', 'mean')
-                    ).reset_index()
-                    
-                    max_jobs_found = zip_geo_counts['Job_Count'].max() if not zip_geo_counts.empty else 1
-                    
-                    # Compute dynamic red color scale mapping: high volume = solid dark crimson
-                    def calculate_rgba_ramp(count, max_val):
-                        ratio = count / max_val
-                        alpha_transparency = int(60 + (ratio * 165))  # Scales opacity from 60 to 225
-                        return [200, 20, 20, alpha_transparency]
-                        
-                    zip_geo_counts['fill_color'] = zip_geo_counts['Job_Count'].apply(lambda c: calculate_rgba_ramp(c, max_jobs_found))
-                    zip_geo_counts['radius_meters'] = 2800  # Approximates standard suburban layout radius
-                    
-                    # Render the specialized Pydeck choropleth chart replacement layer
-                    density_layer = pdk.Layer(
-                        "ScatterplotLayer",
-                        zip_geo_counts,
-                        get_position="[longitude, latitude]",
-                        get_fill_color="fill_color",
-                        get_radius="radius_meters",
-                        pickable=True,
-                        opacity=0.8,
-                        stroked=True,
-                        get_line_color=[130, 10, 10, 120],
-                        line_width_min_pixels=1.5
-                    )
-                    
-                    view_state = pdk.ViewState(
+                zip_geo_counts['fill_color'] = zip_geo_counts['Job_Count'].apply(lambda c: get_red_palette_ramp(c, max_jobs))
+                zip_geo_counts['radius_meters'] = 3200  # Suburban layout zone radius
+                
+                density_layer = pdk.Layer(
+                    "ScatterplotLayer",
+                    zip_geo_counts,
+                    get_position="[longitude, latitude]",
+                    get_fill_color="fill_color",
+                    get_radius="radius_meters",
+                    pickable=True,
+                    stroked=True,
+                    get_line_color=[150, 0, 0, 150],
+                    line_width_min_pixels=1.5
+                )
+                
+                st.pydeck_chart(pdk.Deck(
+                    layers=[density_layer],
+                    initial_view_state=pdk.ViewState(
                         latitude=zip_geo_counts['latitude'].mean(),
                         longitude=zip_geo_counts['longitude'].mean(),
-                        zoom=9.2,
-                        pitch=0
-                    )
-                    
-                    st.pydeck_chart(pdk.Deck(
-                        layers=[density_layer],
-                        initial_view_state=view_state,
-                        map_style="mapbox://styles/mapbox/light-v9",
-                        tooltip={"text": "Zip Code Zone: {Zip Code}\nTotal Job Volume: {Job_Count} tickets"}
-                    ))
-                else:
-                    st.warning("Could not match addresses to exact GPS vectors. Verify address strings contain street numbers.")
+                        zoom=9.5, pitch=0
+                    ),
+                    map_style="mapbox://styles/mapbox/light-v9",
+                    tooltip={"text": "Zip Area: {Zip Code}\nVolume: {Job_Count} jobs"}
+                ))
             else:
-                st.info("No addresses found within the current dataset configuration fields.")
+                st.error("❌ Critical: Geocoding completely unavailable and Zip Codes do not match internal Arizona registry fields.")
                 
             st.markdown("---")
             
@@ -666,6 +684,6 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
                 else:
                     st.info("Travel tracking duration columns are missing or empty in this dataset upload window.")
         else:
-            st.info("ℹ️ No active geographical location records or valid address data columns detected within this file range to map performance details.")
+            st.info("ℹ️ No active geographical location records found to construct maps.")
 else:
     st.info("👋 Welcome! Please upload **all three** operational CSV exports in the sidebar to build your data tables.")
