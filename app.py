@@ -46,12 +46,10 @@ if raw_jobs_df is not None and invoices_df is not None:
         jobs_df = raw_jobs_df.copy()
         st.sidebar.warning("Warning: 'Business Unit' column not found. Showing all jobs.")
 
-    # --- STAGE 2: ATTRIBUTE MULTI-TECH JOBS TO FIRST NAMED TECH ---
+    # --- STAGE 2: ATTRIBUTE MULTI-TECH JOBS TO FIRST NAMED TECH (REPAIRED) ---
     if 'Assigned Team Members' in jobs_df.columns:
-        # If a comma exists, split and keep the first technician's name only
-        jobs_df['Assigned Team Members'] = jobs_df['Assigned Team Members'].astype(str).apply(
-            lambda x: x.split(',')[0].strip() if ',' in x else x.strip()
-        )
+        # Using native vectorized string operations to prevent backend/Arrow type errors
+        jobs_df['Assigned Team Members'] = jobs_df['Assigned Team Members'].astype(str).str.split(',').str[0].str.strip()
         # Clean up any leftover string variations of empty fields
         jobs_df['Assigned Team Members'] = jobs_df['Assigned Team Members'].replace(['nan', 'None', ''], None)
 
@@ -134,14 +132,18 @@ if raw_jobs_df is not None and invoices_df is not None:
     with tab2:
         st.header("Geographic Profitability & Travel Time Analysis")
         
-        # Merge the filtered Jobs and Invoices to tie financial details to Zip Codes
+        # Enforce consistent string casting to protect merge step from mixed-type Arrow errors
         if 'Related Invoices' in jobs_df.columns and '#ID' in invoices_df.columns:
+            jobs_df['Related Invoices'] = jobs_df['Related Invoices'].astype(str).str.split('.').str[0].str.strip()
+            invoices_df['#ID'] = invoices_df['#ID'].astype(str).str.split('.').str[0].str.strip()
+            
             geo_df = pd.merge(jobs_df, invoices_df, left_on='Related Invoices', right_on='#ID', how='inner')
         else:
             geo_df = jobs_df.copy()
 
         # Drop rows where team member extraction left clean null results
-        geo_df = geo_df.dropna(subset=['Assigned Team Members'])
+        if 'Assigned Team Members' in geo_df.columns:
+            geo_df = geo_df.dropna(subset=['Assigned Team Members'])
 
         if 'Zip Code' in geo_df.columns:
             geo_df['Zip Code'] = geo_df['Zip Code'].astype(str).str.strip()
