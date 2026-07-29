@@ -5,7 +5,7 @@ import pandas as pd
 st.set_page_config(page_title="Ops Manager Dashboard", layout="wide")
 
 st.title("Water Heater & Simple Installs Operations Dashboard")
-st.write("Data filtered exclusively for **Water Heaters** and **Simple Installs** business units.")
+st.write("Data filtered exclusively for **Water Heaters** and **Simple Installs** business units. Multi-tech jobs are attributed solely to the primary (first named) technician.")
 
 # ---------------------------------------------------------
 # 1. SIDEBAR FILE UPLOADS
@@ -46,6 +46,15 @@ if raw_jobs_df is not None and invoices_df is not None:
         jobs_df = raw_jobs_df.copy()
         st.sidebar.warning("Warning: 'Business Unit' column not found. Showing all jobs.")
 
+    # --- STAGE 2: ATTRIBUTE MULTI-TECH JOBS TO FIRST NAMED TECH ---
+    if 'Assigned Team Members' in jobs_df.columns:
+        # If a comma exists, split and keep the first technician's name only
+        jobs_df['Assigned Team Members'] = jobs_df['Assigned Team Members'].astype(str).apply(
+            lambda x: x.split(',')[0].strip() if ',' in x else x.strip()
+        )
+        # Clean up any leftover string variations of empty fields
+        jobs_df['Assigned Team Members'] = jobs_df['Assigned Team Members'].replace(['nan', 'None', ''], None)
+
     # --- Clean numeric & date columns for Jobs ---
     numeric_cols_jobs = ['Total Invoice Amount', 'Job Duration Decimal', 'Travel Duration Decimal']
     for col in numeric_cols_jobs:
@@ -69,7 +78,7 @@ if raw_jobs_df is not None and invoices_df is not None:
         st.header("Technician Productivity & Job Performance")
         
         # Only analyze completed work types
-        completed_jobs = jobs_df[jobs_df['Status'] == 'Completed'].copy()
+        completed_jobs = jobs_df[jobs_df['Status'] == 'Completed'].dropna(subset=['Assigned Team Members']).copy()
         
         if not completed_jobs.empty:
             col1, col2 = st.columns(2)
@@ -130,6 +139,9 @@ if raw_jobs_df is not None and invoices_df is not None:
             geo_df = pd.merge(jobs_df, invoices_df, left_on='Related Invoices', right_on='#ID', how='inner')
         else:
             geo_df = jobs_df.copy()
+
+        # Drop rows where team member extraction left clean null results
+        geo_df = geo_df.dropna(subset=['Assigned Team Members'])
 
         if 'Zip Code' in geo_df.columns:
             geo_df['Zip Code'] = geo_df['Zip Code'].astype(str).str.strip()
