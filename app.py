@@ -15,7 +15,7 @@ st.title("Water Heater & Simple Installs Operations Dashboard")
 st.write("Data filtered exclusively for **Water Heaters** and **Simple Installs** business units. Multi-tech jobs are attributed solely to the primary (first named) technician.")
 
 # ---------------------------------------------------------
-# GLOBAL GEOGRAPHIC SEED DICTIONARY (ARIZONA INSTANT LOOKUP)
+# GLOBAL GEOGRAPHIC SEED DICTIONARY (ARIZONA INSTANT LOOKUP SAFETY NET)
 # ---------------------------------------------------------
 AZ_ZIP_COORDINATES = {
     '85258': (33.5634, -111.8927), '85750': (32.2980, -110.8449), 
@@ -61,7 +61,7 @@ def load_regional_geojson_boundaries():
     """Streams minified geometric boundary vectors for localized Arizona postal code grids."""
     url = "https://raw.githubusercontent.com/OpenDataDE/State-zip-code-GeoJSON/master/az_arizona_zip_codes_geo.min.json"
     try:
-        req = urllib.request.Request(url, headers={'User-Agent': 'OpsCode_GeoEngine/10.0'})
+        req = urllib.request.Request(url, headers={'User-Agent': 'OpsCode_GeoEngine/11.0'})
         with urllib.request.urlopen(req, timeout=12) as response:
             return json.loads(response.read().decode())
     except Exception:
@@ -81,7 +81,7 @@ def geocode_address_string(address_str):
     encoded_query = urllib.parse.quote(query_string)
     url = f"https://nominatim.openstreetmap.org/search?q={encoded_query}&format=json&limit=1"
     try:
-        req = urllib.request.Request(url, headers={'User-Agent': 'OpsManagerDashboard_Geomap/10.0'})
+        req = urllib.request.Request(url, headers={'User-Agent': 'OpsManagerDashboard_Geomap/11.0'})
         with urllib.request.urlopen(req, timeout=4) as response:
             data = json.loads(response.read().decode())
             if data:
@@ -301,7 +301,7 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
     jobs_df['Material Cost'] = jobs_df.apply(calculate_job_material_cost, axis=1)
     jobs_df['Net Gross Profit'] = jobs_df['Total Invoice Amount'] - jobs_df['Material Cost'] - jobs_df['Labor Cost']
 
-    # ALL DATA IS LOADED HIERARCHICALLY AND MADE COMPLETELY VIEWABLE
+    # ALL METRICS AND TABLES RENDER AND RESPOND IMMEDIATELY BEFORE SPATIAL PARSING STEPS RUN
     tab1, tab2, tab3 = st.tabs(["Technician & Job Metrics", "Financial & Labor ROI", "Geographic Performance"])
 
     with tab1:
@@ -328,12 +328,12 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
             st.dataframe(fin_metrics.style.format({'Total_Revenue': '${:,.2f}'}), use_container_width=True, hide_index=True)
 
     # ---------------------------------------------------------
-    # TAB 3: GEOGRAPHIC PERFORMANCE (LAZY-LOAD ARCHITECTURE)
+    # TAB 3: GEOGRAPHIC PERFORMANCE (STABILIZED VISUAL DISTRIBUTION ARCHITECTURE)
     # ---------------------------------------------------------
     with tab3:
         st.header("Geographic Profitability & Travel Time Analysis")
         
-        geo_df = pd.merge(jobs_df, invoices_df, left_on='Related Invoices', right_on='#ID', how='left', suffixes=('', '_invoice')) if 'Related Invoices' in jobs_df.columns else jobs_df.copy()
+        geo_df = pd.merge(jobs_df, invoices_df, left_on='Related Invoices', right_on='#ID', how='left', suffixes=('', '_invoice')) if 'Related Invoices' in jobs_df.columns else geo_df.copy()
 
         if 'Zip Code' in geo_df.columns:
             geo_df['Zip Code'] = geo_df['Zip Code'].astype(str).str.strip().str.replace(r'\.0$', '', regex=True).str.zfill(5)
@@ -346,13 +346,43 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
         if not geo_df.empty:
             st.subheader("🗺️ Regional Density Choropleth Map")
             
-            # THE LAZY-LOAD SWITCH: Keeps app responsive instantly. True = precision dots via network API.
             enable_street_precision = st.toggle("🔍 Enable Precision Street-Level Geocoding (Hits live network maps, takes a few seconds)", value=False)
-            st.write("Shaded areas track high-volume zip codes. Blue pins showcase geolocations.")
+            st.write("Shaded areas track high-volume zip codes. Blue pins showcase individual geolocations.")
             
-            with st.spinner("Processing spatial maps framework..."):
+            geojson_data = load_regional_geojson_boundaries()
+            
+            # STAGE 1: DYNAMIC GEO-CENTROID REGISTRY GENERATION
+            # Scans the loaded boundary shapes to map out centers for all Arizona zip codes instantly
+            dynamic_zip_lookup = {}
+            if geojson_data:
+                for feature in geojson_data.get('features', []):
+                    props = feature.get('properties', {})
+                    z_code = None
+                    for key in ['ZCTA5CE10', 'ZCTA5', 'name', 'GEOID10']:
+                        if key in props and props[key]:
+                            z_code = str(props[key]).strip().zfill(5)
+                            break
+                    if z_code:
+                        geom = feature.get('geometry', {})
+                        g_type = geom.get('type', '')
+                        coords = geom.get('coordinates', [])
+                        lats, lons = [], []
+                        if g_type == 'Polygon':
+                            for ring in coords:
+                                for pt in ring:
+                                    lons.append(pt[0])
+                                    lats.append(pt[1])
+                        elif g_type == 'MultiPolygon':
+                            for poly in coords:
+                                for ring in poly:
+                                    for pt in ring:
+                                        lons.append(pt[0])
+                                        lats.append(pt[1])
+                        if lats and lons:
+                            dynamic_zip_lookup[z_code] = (np.mean(lats), np.mean(lons))
+
+            with st.spinner("Processing spatial metrics layer..."):
                 def resolve_exact_coordinates(row):
-                    # Speed 2: Execute street requests only if explicitly turned on by user
                     if enable_street_precision:
                         addr = str(row.get('Full Address', '')).strip()
                         if addr and addr.lower() != 'nan' and len(addr) > 5:
@@ -360,9 +390,11 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
                             if coords:
                                 return coords[0], coords[1]
                     
-                    # Speed 1: Instant baseline data alignment via internal array lookups
                     z_code = str(row.get('Zip Code', '')).strip()
-                    if 'AZ_ZIP_COORDINATES' in globals() and z_code in AZ_ZIP_COORDINATES:
+                    # Query newly built dynamic registry first to guarantee data retention
+                    if z_code in dynamic_zip_lookup:
+                        return dynamic_zip_lookup[z_code]
+                    if z_code in AZ_ZIP_COORDINATES:
                         return AZ_ZIP_COORDINATES[z_code]
                     return np.nan, np.nan
 
@@ -371,11 +403,25 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
                 geo_df['longitude'] = geo_df['coords_tuple'].map(lambda x: x[1])
             
             map_clean_df = geo_df.dropna(subset=['latitude', 'longitude']).copy()
+            
+            # STAGE 2: DETERMINISTIC SPATIAL JITTERING ENGINE
+            # Scatters stacked coordinate points slightly to clearly show separate overlapping jobs
+            if not map_clean_df.empty:
+                np.random.seed(42)  # Seeds ensure coordinates remain stable across map updates
+                if not enable_street_precision:
+                    # Distribute points cleanly within boundaries if using zip centers
+                    map_clean_df['latitude'] += np.random.uniform(-0.007, 0.007, size=len(map_clean_df))
+                    map_clean_df['longitude'] += np.random.uniform(-0.007, 0.007, size=len(map_clean_df))
+                else:
+                    # Apply tighter separation jitter to multi-unit buildings or stacked results
+                    dupes = map_clean_df.duplicated(subset=['latitude', 'longitude'], keep=False)
+                    if dupes.any():
+                        map_clean_df.loc[dupes, 'latitude'] += np.random.uniform(-0.0008, 0.0008, size=dupes.sum())
+                        map_clean_df.loc[dupes, 'longitude'] += np.random.uniform(-0.0008, 0.0008, size=dupes.sum())
+            
             zip_geo_counts = map_clean_df.groupby('Zip Code').size().reset_index(name='Job_Count')
             max_jobs = max(1, zip_geo_counts['Job_Count'].max())
             zip_counts_dict = zip_geo_counts.set_index('Zip Code')['Job_Count'].to_dict()
-            
-            geojson_data = load_regional_geojson_boundaries()
             
             if geojson_data:
                 features_to_render = []
@@ -510,6 +556,8 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
                     ))
                 else:
                     st.warning("No geographic boundaries found matching these data points.")
+            else:
+                st.error("Boundary layout assets could not be streamed from cloud repositories.")
             
             st.markdown("---")
             
