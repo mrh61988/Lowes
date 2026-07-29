@@ -21,7 +21,7 @@ def format_hours_mins(decimal_hours):
     return f"{hours}:{minutes:02d}"
 
 # ---------------------------------------------------------
-# LABOUR COST CALCULATION ENGINE
+# LABOUR COST CALCULATION ENGINE (JOB TICKETS)
 # ---------------------------------------------------------
 def calculate_job_labor_cost(row):
     tech = str(row['Assigned Team Members'])
@@ -32,13 +32,13 @@ def calculate_job_labor_cost(row):
     if pd.isna(duration): duration = 0.0
     if pd.isna(revenue): revenue = 0.0
     
-    # Internal Salaried Staff
+    # Internal Salaried Staff (High-level allocation for job rows)
     if tech == 'Sean Marble':
         return duration * (70000 / 2080)
     elif tech == 'Mathew Hodges':
         return duration * (65000 / 2080)
         
-    # Internal Hourly Staff ($25/hr)
+    # Internal Hourly Staff ($25/hr baseline for individual tickets)
     elif tech in ['Matt Schlosser', 'Tanner LaForge', 'Edward Lopez']:
         return duration * 25.00
         
@@ -90,27 +90,36 @@ def calculate_job_material_cost(row):
 # 1. SIDEBAR FILE UPLOADS
 # ---------------------------------------------------------
 st.sidebar.header("📁 Upload Operational Data")
-st.sidebar.write("Upload your CSV exports below to populate the data tables.")
+st.sidebar.write("Upload all three CSV files to compile comprehensive P&L figures.")
 
 uploaded_jobs = st.sidebar.file_uploader("Upload 'jobs full data.csv'", type=["csv"])
 uploaded_invoices = st.sidebar.file_uploader("Upload 'invoices.csv'", type=["csv"])
+uploaded_timesheets = st.sidebar.file_uploader("Upload 'timesheets.csv'", type=["csv"])
 
-def process_uploaded_file(file):
+def process_uploaded_file(file, shifted_header=True):
     if file is not None:
-        df_raw = pd.read_csv(file)
-        df = df_raw.copy()
-        df.columns = df.iloc[0]
-        df = df[1:].reset_index(drop=True)
-        return df
+        if shifted_header:
+            df_raw = pd.read_csv(file)
+            df = df_raw.copy()
+            df.columns = df.iloc[0]
+            df = df[1:].reset_index(drop=True)
+            return df
+        else:
+            return pd.read_csv(file)
     return None
 
-raw_jobs_df = process_uploaded_file(uploaded_jobs)
-invoices_df = process_uploaded_file(uploaded_invoices)
+raw_jobs_df = process_uploaded_file(uploaded_jobs, shifted_header=True)
+invoices_df = process_uploaded_file(uploaded_invoices, shifted_header=True)
+timesheets_df = process_uploaded_file(uploaded_timesheets, shifted_header=False) # Standard format CSV
 
 # ---------------------------------------------------------
 # 2. DASHBOARD LOGIC
 # ---------------------------------------------------------
-if raw_jobs_df is not None and invoices_df is not None:
+if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not None:
+    
+    # Clean Timesheet Numeric Fields
+    if 'Duration Decimal' in timesheets_df.columns:
+        timesheets_df['Duration Decimal'] = pd.to_numeric(timesheets_df['Duration Decimal'], errors='coerce').fillna(0.0)
     
     # Filter Business Units
     if 'Business Unit' in raw_jobs_df.columns:
@@ -182,6 +191,49 @@ if raw_jobs_df is not None and invoices_df is not None:
                 st.dataframe(job_mix.style.format({
                     'Avg Time Spent (H:MM)': format_hours_mins, 'Avg Ticket Size': '${:,.2f}', 'Total Revenue': '${:,.2f}'
                 }), use_container_width=True, hide_index=True)
+            
+            st.write("---")
+            
+            # ---------------------------------------------------------
+            # ADDED TABLE: CLOCK HOURS VS TICKET HOURS AUDITING LOG
+            # ---------------------------------------------------------
+            st.subheader("⏰ Clock Hours vs. Ticket Hours Auditing Log")
+            st.write("Exposes unallocated time by contrasting total clocked timesheet hours against direct billable job durations.")
+            
+            ts_totals_audit = timesheets_df.groupby('User')['Duration Decimal'].sum().reset_index()
+            all_unique_techs = completed_jobs['Assigned Team Members'].unique()
+            
+            utilization_records = []
+            for tech in all_unique_techs:
+                j_hours = completed_jobs[completed_jobs['Assigned Team Members'] == tech]['Job Duration Decimal'].sum()
+                ts_match = ts_totals_audit[ts_totals_audit['User'] == tech]
+                ts_hours = ts_match['Duration Decimal'].values[0] if not ts_match.empty else 0.0
+                unallocated = max(0.0, ts_hours - j_hours)
+                
+                # Check if internal hourly worker to append payroll waste impact
+                is_hourly = tech in ['Matt Schlosser', 'Tanner LaForge', 'Edward Lopez']
+                waste_cost = unallocated * 25.00 if is_hourly else 0.0
+                
+                utilization_records.append({
+                    'Tech Name': tech,
+                    'Paid Clock Hours (Timesheets)': ts_hours,
+                    'On-Ticket Hours (Jobs)': j_hours,
+                    'Unallocated Variance (Hours)': unallocated,
+                    'Hourly Payroll Slippage': waste_cost if is_hourly else np.nan
+                })
+                
+            utilization_df = pd.DataFrame(utilization_records).sort_values(by='Unallocated Variance (Hours)', ascending=False)
+            
+            st.dataframe(
+                utilization_df.style.format({
+                    'Paid Clock Hours (Timesheets)': '{:.2f} hrs',
+                    'On-Ticket Hours (Jobs)': '{:.2f} hrs',
+                    'Unallocated Variance (Hours)': '{:.2f} hrs',
+                    'Hourly Payroll Slippage': '${:,.2f}'
+                }).clear().highlight_null(color='transparent'), 
+                use_container_width=True, 
+                hide_index=True
+            )
         else:
             st.warning("No 'Completed' status jobs found.")
 
@@ -193,23 +245,43 @@ if raw_jobs_df is not None and invoices_df is not None:
         
         if not completed_jobs.empty:
             st.subheader("📊 Aggregate Team Efficiency")
+            st.write("Hourly employee labor is drawn directly from **Timesheets** at **$25.00/hr**, matching actual cash outflows.")
+            
+            # Calculate base fields from jobs
             fin_metrics = completed_jobs.groupby('Assigned Team Members').agg(
                 Jobs_Completed=('Status', 'count'),
                 Total_Revenue=('Total Invoice Amount', 'sum'),
                 Total_Material_Cost=('Material Cost', 'sum'),
-                Total_Labor_Cost=('Labor Cost', 'sum'),
-                Total_Net_Profit=('Net Gross Profit', 'sum')
-            ).reset_index().sort_values('Total_Net_Profit', ascending=False)
+                Total_Labor_Cost_Jobs=('Labor Cost', 'sum')
+            ).reset_index()
             
-            # Recalculated Metric: Labor Cost / (Revenue - Materials)
+            # Timesheet calculations
+            ts_totals_finance = timesheets_df.groupby('User')['Duration Decimal'].sum().reset_index()
+            hourly_techs_list = ['Matt Schlosser', 'Tanner LaForge', 'Edward Lopez']
+            
+            def determine_true_labor(row):
+                tech = row['Assigned Team Members']
+                if tech in hourly_techs_list:
+                    match = ts_totals_finance[ts_totals_finance['User'] == tech]
+                    if not match.empty:
+                        return match['Duration Decimal'].values[0] * 25.00
+                return row['Total_Labor_Cost_Jobs']
+            
+            # Assign accurate payroll overhead
+            fin_metrics['Labor Cost Burden'] = fin_metrics.apply(determine_true_labor, axis=1)
+            fin_metrics['Net Gross Profit'] = fin_metrics['Total_Revenue'] - fin_metrics['Total_Material_Cost'] - fin_metrics['Labor Cost Burden']
+            
+            # Recalculated Metric: Labor Cost Burden / (Revenue - Materials)
             revenue_minus_materials = fin_metrics['Total_Revenue'] - fin_metrics['Total_Material_Cost']
-            fin_metrics['Labor % of Rev Less Mats'] = (fin_metrics['Total_Labor_Cost'] / revenue_minus_materials) * 100
+            fin_metrics['Labor % of Rev Less Mats'] = (fin_metrics['Labor Cost Burden'] / revenue_minus_materials) * 100
             fin_metrics['Labor % of Rev Less Mats'] = fin_metrics['Labor % of Rev Less Mats'].replace([np.inf, -np.inf], np.nan).fillna(0.0)
             
-            fin_metrics.columns = ['Name', 'Jobs Done', 'Gross Revenue', 'Material Costs', 'Labor Cost Burden', 'Net Gross Profit', 'Labor % of (Rev - Mats)']
+            fin_metrics_display = fin_metrics[['Assigned Team Members', 'Jobs_Completed', 'Total_Revenue', 'Total_Material_Cost', 'Labor Cost Burden', 'Net Gross Profit', 'Labor % of Rev Less Mats']].copy()
+            fin_metrics_display = fin_metrics_display.sort_values(by='Net Gross Profit', ascending=False)
+            fin_metrics_display.columns = ['Name', 'Jobs Done', 'Gross Revenue', 'Material Costs', 'Labor Cost Burden', 'Net Gross Profit', 'Labor % of (Rev - Mats)']
             
             st.dataframe(
-                fin_metrics.style.format({
+                fin_metrics_display.style.format({
                     'Gross Revenue': '${:,.2f}',
                     'Material Costs': '${:,.2f}',
                     'Labor Cost Burden': '${:,.2f}',
@@ -225,11 +297,11 @@ if raw_jobs_df is not None and invoices_df is not None:
             # Helper color rule using raw CSS styles (Safe across different Pandas versions)
             def color_profit_loss(val):
                 if val < 0:
-                    return 'background-color: #f8d7da; color: #721c24;'  # Soft red alert for losses
+                    return 'background-color: #f8d7da; color: #721c24;'
                 elif val == 0:
-                    return 'background-color: #fff3cd; color: #856404;'  # Soft yellow alert for break-evens
+                    return 'background-color: #fff3cd; color: #856404;'
                 else:
-                    return 'background-color: #d4edda; color: #155724;'  # Soft green alert for profit margins
+                    return 'background-color: #d4edda; color: #155724;'
 
             # Shared filter logic for contractors
             contractor_keywords = ['contractor', 'contactor', 'llc', 'ken', 'barber', 'wrench', 'wrentch', 'presidio', 'indian']
@@ -239,7 +311,7 @@ if raw_jobs_df is not None and invoices_df is not None:
             contractor_df = completed_jobs[is_contractor_mask].copy()
             
             # ---------------------------------------------------------
-            # ADDED TABLE: CONTRACTOR AGGREGATE PERFORMANCE SUMMARY
+            # CONTRACTOR AGGREGATE PERFORMANCE SUMMARY
             # ---------------------------------------------------------
             st.subheader("🏢 Contractor Aggregate Performance Summary")
             st.write("Summarizes total revenue, material overhead, payouts, and net business profit/loss aggregated by contractor entity. Sorted from most unlucrative to most profitable.")
@@ -251,7 +323,7 @@ if raw_jobs_df is not None and invoices_df is not None:
                     Total_Materials=('Material Cost', 'sum'),
                     Total_Payout=('Labor Cost', 'sum'),
                     Total_Net_Profit=('Net Gross Profit', 'sum')
-                ).reset_index().sort_values(by='Total_Net_Profit', ascending=True) # Ascending highlights losses first
+                ).reset_index().sort_values(by='Total_Net_Profit', ascending=True)
                 
                 contractor_summary.columns = ['Contractor Name', 'Total Jobs Done', 'Total Revenue', 'Total Material Overhead', 'Total Payouts', 'Total Net Profit / Loss']
                 
@@ -274,10 +346,9 @@ if raw_jobs_df is not None and invoices_df is not None:
             st.write("---")
             
             # ---------------------------------------------------------
-            # CONTRACTOR PROFIT/LOSS AUDIT (JOB-BY-JOB)
+            # CONTRACTOR PROFIT/LOSS AUDIT (JOB-BY-JOB DETAIL)
             # ---------------------------------------------------------
             st.subheader("🏗️ Contractor Profit & Loss Audit (Job-by-Job Detail)")
-            st.write("This log tracks individual contractor tickets to isolate specific problematic invoices.")
             
             if not contractor_df.empty:
                 contractor_audit = contractor_df[['#ID', 'Assigned Team Members', 'Business Unit', 'Total Invoice Amount', 'Material Cost', 'Labor Cost', 'Net Gross Profit']].copy()
@@ -356,4 +427,4 @@ if raw_jobs_df is not None and invoices_df is not None:
         else:
             st.warning("No Zip Code field populated in source data.")
 else:
-    st.info("👋 Welcome! Please upload **both** operational CSV exports in the sidebar to build your data tables.")
+    st.info("👋 Welcome! Please upload **all three** operational CSV exports in the sidebar to build your data tables.")
