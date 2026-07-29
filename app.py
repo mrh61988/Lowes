@@ -35,25 +35,6 @@ def sanitize_numeric_series(series):
     return pd.to_numeric(cleaned, errors='coerce').fillna(0.0)
 
 # ---------------------------------------------------------
-# HIGH-FIDELITY LOCAL GEOGRAPHIC SEED DICTIONARY (ARIZONA)
-# ---------------------------------------------------------
-AZ_ZIP_COORDINATES = {
-    '85258': (33.5634, -111.8927), '85750': (32.2980, -110.8449), 
-    '86426': (35.0134, -114.5497), '85286': (33.2715, -111.8316), 
-    '85251': (33.4936, -111.9167), '85741': (32.3472, -111.0419), 
-    '85745': (32.2434, -111.0179), '85138': (33.0073, -111.9324), 
-    '85143': (33.1911, -111.5280), '85308': (33.6539, -112.1694), 
-    '85142': (33.2487, -111.6343), '85204': (33.3992, -111.7896), 
-    '85042': (33.3794, -112.0283), '85326': (33.3519, -112.5908), 
-    '85335': (33.6082, -112.3241), '85224': (33.3301, -111.8632), 
-    '85297': (33.2781, -111.7096), '85044': (33.3291, -111.9943), 
-    '85736': (31.9011, -111.3702), '85255': (33.6860, -111.9020),
-    '85260': (33.6000, -111.8900), '85032': (33.6150, -112.0100),
-    '85304': (33.6100, -112.1800), '85281': (33.4200, -111.9300),
-    '85710': (32.2200, -110.8300), '85712': (32.2500, -110.8900)
-}
-
-# ---------------------------------------------------------
 # DYNAMIC GEOJSON REGIONAL BOUNDARY INGESTION ENGINE
 # ---------------------------------------------------------
 @st.cache_data(ttl=604800, show_spinner=False)
@@ -61,7 +42,7 @@ def load_regional_geojson_boundaries():
     """Streams minified geometric boundary vectors for localized Arizona postal code grids."""
     url = "https://raw.githubusercontent.com/OpenDataDE/State-zip-code-GeoJSON/master/az_arizona_zip_codes_geo.min.json"
     try:
-        req = urllib.request.Request(url, headers={'User-Agent': 'OpsCode_GeoEngine/5.0'})
+        req = urllib.request.Request(url, headers={'User-Agent': 'OpsCode_GeoEngine/6.0'})
         with urllib.request.urlopen(req, timeout=12) as response:
             return json.loads(response.read().decode())
     except Exception:
@@ -240,7 +221,7 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
 
     jobs_df_clean = pd.DataFrame()
     jobs_df_clean['Business Unit'] = raw_jobs_df[mapped_bu].fillna('General').astype(str) if mapped_bu else 'General'
-    jobs_df_clean['Assigned Team Members'] = raw_jobs_df[mapped_tech].fillna('Unknown Tech').astype(str) if mapped_tech else 'Unknown Tech'
+    jobs_df_clean['Assigned Team Members'] = raw_jobs_df[mapped_tech].fillna('Unassigned').astype(str) if mapped_tech else 'Unassigned'
     jobs_df_clean['Total Invoice Amount'] = sanitize_numeric_series(raw_jobs_df[mapped_rev]) if mapped_rev else 0.0
     jobs_df_clean['Total Estimate Amount'] = sanitize_numeric_series(raw_jobs_df[mapped_est]) if mapped_est else 0.0
     jobs_df_clean['Job Duration Decimal'] = sanitize_numeric_series(raw_jobs_df[mapped_job_dur]) if mapped_job_dur else 0.0
@@ -257,8 +238,9 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
     for col in raw_jobs_df.columns:
         if 'timestamp' in str(col).lower(): jobs_df_clean[col] = raw_jobs_df[col]
 
-    jobs_df = jobs_df_clean[jobs_df_clean['Business Unit'].str.contains('Water Heaters|Simple Installs', case=False, na=False)].copy()
-    jobs_df['Assigned Team Members'] = jobs_df['Assigned Team Members'].astype(str).str.split(',').str[0].str.strip().replace(['nan', 'None', ''], None)
+    # COMPREHENSIVE REGEX PATTERN MATCH TO RETAIN ALL DATA VARIANTS (Singular/Plural)
+    jobs_df = jobs_df_clean[jobs_df_clean['Business Unit'].str.contains('Water Heater|Simple Install', case=False, na=False)].copy()
+    jobs_df['Assigned Team Members'] = jobs_df['Assigned Team Members'].astype(str).str.split(',').str[0].str.strip().replace(['nan', 'None', ''], 'Unassigned')
 
     column_headers = jobs_df.columns.tolist()
     jobs_df['Custom Ticket Hours'] = jobs_df.apply(lambda r: compute_custom_ticket_hours(r, column_headers), axis=1)
@@ -267,7 +249,6 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
     # --- AUTO-MAPPING FOR INVOICES CSV ---
     inv_cols = list(invoices_df.columns)
     inv_id_col = auto_map_column(['#id', 'invoice id', 'id', 'invoice number'], inv_cols)
-    inv_prof_col = auto_map_column(['profit margin', 'margin', 'net profit'], inv_cols)
     if inv_id_col and inv_id_col != '#ID': invoices_df['#ID'] = invoices_df[inv_id_col]
 
     valid_ts_dates = timesheets_df['Work Date'].dropna()
@@ -282,13 +263,13 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
 
     with tab1:
         st.header("Technician Productivity & Job Performance")
-        completed_jobs = jobs_df[jobs_df['Status'] == 'Completed'].dropna(subset=['Assigned Team Members']).copy()
+        completed_jobs = jobs_df[jobs_df['Status'] == 'Completed'].copy()
         if not completed_jobs.empty:
             tech_metrics = completed_jobs.groupby('Assigned Team Members').agg(
                 Total_Jobs_Completed=('Status', 'count'), Avg_Duration_Hours=('Custom Ticket Hours', 'mean'),
                 Total_Revenue_Generated=('Total Invoice Amount', 'sum'), Avg_Revenue_Per_Job=('Total Invoice Amount', 'mean')
             ).reset_index().sort_values('Total_Jobs_Completed', ascending=False)
-            st.dataframe(tech_metrics.style.format({'Total_Revenue_Generated': '${:,.2f}'}), use_container_width=True)
+            st.dataframe(tech_metrics.style.format({'Total_Revenue_Generated': '${:,.2f}'}), use_container_width=True, hide_index=True)
 
     with tab2:
         st.header("Financial Performance & Labor Cost Analysis")
@@ -297,133 +278,146 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
                 Jobs_Completed=('Status', 'count'), Total_Revenue=('Total Invoice Amount', 'sum'),
                 Total_Material_Cost=('Material Cost', 'sum'), Total_Labor_Cost_Jobs=('Labor Cost', 'sum')
             ).reset_index()
-            st.dataframe(fin_metrics.style.format({'Total_Revenue': '${:,.2f}'}), use_container_width=True)
+            st.dataframe(fin_metrics.style.format({'Total_Revenue': '${:,.2f}'}), use_container_width=True, hide_index=True)
 
     # ---------------------------------------------------------
-    # TAB 3: GEOGRAPHIC PERFORMANCE (STREET-LEVEL HIGH-CONTRAST CHOROPLETH + JOB COUNT OVERLAY)
+    # TAB 3: GEOGRAPHIC PERFORMANCE (ZERO-LOSS DATA MAPPER WITH TEXT OVERLAYS)
     # ---------------------------------------------------------
     with tab3:
         st.header("Geographic Profitability & Travel Time Analysis")
         
         geo_df = pd.merge(jobs_df, invoices_df, left_on='Related Invoices', right_on='#ID', how='left', suffixes=('', '_invoice')) if 'Related Invoices' in jobs_df.columns else jobs_df.copy()
-        if 'Assigned Team Members' in geo_df.columns: geo_df = geo_df.dropna(subset=['Assigned Team Members'])
 
         if 'Zip Code' in geo_df.columns:
             geo_df['Zip Code'] = geo_df['Zip Code'].astype(str).str.strip().str.replace(r'\.0$', '', regex=True).str.zfill(5)
-            geo_df = geo_df[(geo_df['Zip Code'] != '00nan') & (geo_df['Zip Code'] != '00000')]
+            geo_df = geo_df[(geo_df['Zip Code'] != '00nan') & (geo_df['Zip Code'] != '00000') & (geo_df['Zip Code'] != '0None')]
 
         if not geo_df.empty:
             st.subheader("🗺️ Regional Density Choropleth Map")
-            st.write("Zip code zones filled with a high-contrast red opacity gradient. **Exact job volume numbers are anchored onto the center of each region**.")
+            st.write("Shaded by localized transactional density. **Dark maroon patches call out top tier volume locations**.")
             
-            # Map out local coordinate center points dynamically
-            geo_df['latitude'] = geo_df['Zip Code'].map(lambda x: AZ_ZIP_COORDINATES.get(x, (np.nan, np.nan))[0])
-            geo_df['longitude'] = geo_df['Zip Code'].map(lambda x: AZ_ZIP_COORDINATES.get(x, (np.nan, np.nan))[1])
-            map_clean_df = geo_df.dropna(subset=['latitude', 'longitude']).copy()
+            # Map volumes to dictionary for quick cross referencing
+            zip_geo_counts = geo_df.groupby('Zip Code').size().reset_index(name='Job_Count')
+            max_jobs = max(1, zip_geo_counts['Job_Count'].max())
+            zip_counts_dict = zip_geo_counts.set_index('Zip Code')['Job_Count'].to_dict()
             
-            if not map_clean_df.empty:
-                # Group data to capture counts and position anchors
-                zip_geo_counts = map_clean_df.groupby('Zip Code').agg(
-                    Job_Count=('Zip Code', 'count'),
-                    latitude=('latitude', 'mean'),
-                    longitude=('longitude', 'mean')
-                ).reset_index()
+            geojson_data = load_regional_geojson_boundaries()
+            
+            if geojson_data:
+                features_to_render = []
+                text_overlay_data = []
                 
-                max_jobs = max(1, zip_geo_counts['Job_Count'].max())
-                zip_counts_dict = zip_geo_counts.set_index('Zip Code')['Job_Count'].to_dict()
-                
-                # Format string values explicitly for the Text Overlay Engine
-                zip_geo_counts['job_label'] = zip_geo_counts['Job_Count'].astype(str)
-                
-                geojson_data = load_regional_geojson_boundaries()
-                
-                if geojson_data:
-                    features_to_render = []
-                    
-                    # Enhanced Power Scale: Forces rapid hue shifts between close count integers
-                    def get_high_contrast_red_ramp(count, max_val):
-                        power_ratio = (count / max_val) ** 0.5  # Square-root expands variance in low-mid zones
-                        power_ratio = min(1.0, max(0.0, power_ratio))
-                        
-                        # Pale high-transparency rose pink -> Deep solid crimson blood-red
-                        r = int(255 - (power_ratio * (255 - 145)))
-                        g = int(210 - (power_ratio * 210))
-                        b = int(210 - (power_ratio * 210))
-                        alpha = int(35 + (power_ratio * 190))  # Aggressive alpha jump from 35 to 225
-                        return [r, g, b, alpha]
-
-                    for feature in geojson_data.get('features', []):
-                        props = feature.get('properties', {})
-                        z_code = None
-                        for key in ['ZCTA5CE10', 'ZCTA5', 'name', 'GEOID10']:
-                            if key in props and props[key]:
-                                z_code = str(props[key]).strip().zfill(5)
-                                break
-                        
-                        if z_code in zip_counts_dict:
-                            count = zip_counts_dict[z_code]
-                            color = get_high_contrast_red_ramp(count, max_jobs)
-                            
-                            feature['zip_label'] = z_code
-                            feature['job_volume'] = int(count)
-                            feature['properties']['fill_color'] = color
-                            feature['properties']['zip_label'] = z_code
-                            feature['properties']['job_volume'] = int(count)
-                            features_to_render.append(feature)
-
-                    if features_to_render:
-                        filtered_geojson = {"type": "FeatureCollection", "features": features_to_render}
-                        
-                        # LAYER 1: Base Choropleth Shapes
-                        choropleth_layer = pdk.Layer(
-                            "GeoJsonLayer",
-                            filtered_geojson,
-                            opacity=0.75,
-                            stroked=True,
-                            filled=True,
-                            wireframe=True,
-                            get_fill_color="properties.fill_color",
-                            get_line_color=[110, 5, 5, 200],
-                            get_line_width=2.0,
-                            line_width_min_pixels=1,
-                            pickable=True
-                        )
-                        
-                        # LAYER 2: Live Ticket Count Value Label Overlay
-                        text_overlay_layer = pdk.Layer(
-                            "TextLayer",
-                            zip_geo_counts,
-                            get_position="[longitude, latitude]",
-                            get_text="job_label",
-                            get_color=[20, 20, 20, 255],  # Solid charcoal black text
-                            get_size=20,
-                            size_scale=1,
-                            get_alignment_baseline="'center'",
-                            get_text_anchor="'middle'",
-                            font_weight="'bold'",
-                            font_family="'Arial, Helvetica, sans-serif'"
-                        )
-                        
-                        st.pydeck_chart(pdk.Deck(
-                            layers=[choropleth_layer, text_overlay_layer],
-                            initial_view_state=pdk.ViewState(
-                                latitude=zip_geo_counts['latitude'].mean(),
-                                longitude=zip_geo_counts['longitude'].mean(),
-                                zoom=9.5, pitch=0
-                            ),
-                            map_style=pdk.map_styles.CARTO_ROAD,
-                            tooltip={"text": "Zip Code: {zip_label}\nVolume: {job_volume} tickets"}
-                        ))
+                # HIGH-CONTRAST EXPONENTIAL POWER GRADIENT COLOR SCALE
+                def get_high_contrast_red_ramp(count, max_val):
+                    if max_val <= 1:
+                        ratio = 1.0
                     else:
-                        st.warning("Uploaded Zip Codes do not intersect with the boundary file coordinates registry.")
+                        ratio = (count - 1) / (max_val - 1) if max_val > 1 else 0.0
+                        ratio = ratio ** 0.7  # Accentuates visual differences among lower numbers
+                    
+                    # 1 Job = Very pale, transparent red tint
+                    # Max Jobs = Dense, bold, deep dark maroon blood-red
+                    r = int(255 - (ratio * (255 - 139)))
+                    g = int(185 - (ratio * 185))
+                    b = int(185 - (ratio * 185))
+                    alpha = int(60 + (ratio * 175))
+                    return [r, g, b, alpha]
+
+                for feature in geojson_data.get('features', []):
+                    props = feature.get('properties', {})
+                    z_code = None
+                    for key in ['ZCTA5CE10', 'ZCTA5', 'name', 'GEOID10']:
+                        if key in props and props[key]:
+                            z_code = str(props[key]).strip().zfill(5)
+                            break
+                    
+                    if z_code and z_code in zip_counts_dict:
+                        count = zip_counts_dict[z_code]
+                        color = get_high_contrast_red_ramp(count, max_jobs)
+                        
+                        feature['properties']['fill_color'] = color
+                        feature['properties']['zip_label'] = z_code
+                        feature['properties']['job_volume'] = int(count)
+                        features_to_render.append(feature)
+                        
+                        # DYNAMIC CENTROID EXTRACTION ENGINE: Pulls geometry centers on the fly
+                        geom = feature.get('geometry', {})
+                        g_type = geom.get('type', '')
+                        coords = geom.get('coordinates', [])
+                        lats, lons = [], []
+                        
+                        if g_type == 'Polygon':
+                            for ring in coords:
+                                for pt in ring:
+                                    lons.append(pt[0])
+                                    lats.append(pt[1])
+                        elif g_type == 'MultiPolygon':
+                            for poly in coords:
+                                for ring in poly:
+                                    for pt in ring:
+                                        lons.append(pt[0])
+                                        lats.append(pt[1])
+                                        
+                        if lats and lons:
+                            text_overlay_data.append({
+                                'zip_code': z_code,
+                                'job_count_str': str(count),
+                                'latitude': np.mean(lats),
+                                'longitude': np.mean(lons)
+                            })
+
+                if features_to_render:
+                    filtered_geojson = {"type": "FeatureCollection", "features": features_to_render}
+                    text_overlay_df = pd.DataFrame(text_overlay_data)
+                    
+                    # LAYER 1: Dynamic Vector Shading Boundary Layer
+                    choropleth_layer = pdk.Layer(
+                        "GeoJsonLayer",
+                        filtered_geojson,
+                        opacity=0.85,
+                        stroked=True,
+                        filled=True,
+                        wireframe=True,
+                        get_fill_color="properties.fill_color",
+                        get_line_color=[120, 20, 20, 255],
+                        get_line_width=2.5,
+                        line_width_min_pixels=1,
+                        pickable=True
+                    )
+                    
+                    # LAYER 2: Text Value Overlay Layer
+                    text_layer = pdk.Layer(
+                        "TextLayer",
+                        text_overlay_df,
+                        get_position="[longitude, latitude]",
+                        get_text="job_count_str",
+                        get_color=[20, 20, 20, 255],
+                        get_size=22,
+                        size_scale=1,
+                        get_alignment_baseline="'center'",
+                        get_text_anchor="'middle'",
+                        font_weight="'bold'",
+                        font_family="'Arial, sans-serif'"
+                    )
+                    
+                    st.pydeck_chart(pdk.Deck(
+                        layers=[choropleth_layer, text_layer],
+                        initial_view_state=pdk.ViewState(
+                            latitude=text_overlay_df['latitude'].mean() if not text_overlay_df.empty else 33.45,
+                            longitude=text_overlay_df['longitude'].mean() if not text_overlay_df.empty else -112.07,
+                            zoom=9.3, pitch=0
+                        ),
+                        map_style=pdk.map_styles.CARTO_ROAD,
+                        tooltip={"text": "Zip Area: {zip_label}\nVolume: {job_volume} Tickets"}
+                    ))
                 else:
-                    st.error("Boundary shapefile could not be loaded. Confirm network connection.")
+                    st.warning("Uploaded file records are valid but no postal zip matches intersected the state boundaries coordinate registry.")
             else:
-                st.info("No valid geographical parameters available to parse onto current map style windows.")
-            
+                st.error("Boundary layout assets could not be streamed from cloud repositories.")
+                
             st.markdown("---")
             
-            # --- METRICS TABLES ---
+            # --- METRICS TABLES (Zero data elements dropped) ---
             col3, col4 = st.columns(2)
             with col3:
                 st.subheader("💰 Most Lucrative Zip Codes (Net Profit)")
@@ -440,5 +434,7 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
                         Job_Count=('Zip Code', 'count'), Avg_Travel_Hours=('Travel Duration Decimal', 'mean')
                     ).reset_index().sort_values('Avg_Travel_Hours', ascending=False)
                     st.dataframe(travel_waste.style.format({'Avg_Travel_Hours': '{:.2f} hrs'}), use_container_width=True, hide_index=True)
+                else:
+                    st.info("Travel tracking metrics are missing or empty in this upload layout stream.")
 else:
-    st.info("👋 Welcome! Please upload all operational CSV exports in the sidebar to compile dashboard data.")
+    st.info("👋 Welcome! Please upload all three operational CSV exports in the sidebar to run data logs.")
