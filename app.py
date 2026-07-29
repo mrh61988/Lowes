@@ -127,9 +127,20 @@ if raw_jobs_df is not None and invoices_df is not None:
     if 'Profit Margin' in invoices_df.columns:
         invoices_df['Profit Margin'] = pd.to_numeric(invoices_df['Profit Margin'], errors='coerce').fillna(0.0)
 
-    # --- STAGE 3: APPLY PAY STRUCTURE CALCULATIONS ---
+    # --- STAGE 3: APPLY PAY STRUCTURE & MATERIAL CALCULATIONS ---
     jobs_df['Labor Cost'] = jobs_df.apply(calculate_job_labor_cost, axis=1)
+    
+    # Base material cost calculation
     jobs_df['Material Cost'] = jobs_df['Invoice - Total Product Cost'] + jobs_df['Invoice - Total Service Cost']
+    
+    # Adjustment: Deduct $125 built-in labor cushion for all Water Heater business unit jobs
+    if 'Business Unit' in jobs_df.columns:
+        is_water_heater = jobs_df['Business Unit'].str.contains('Water Heaters', case=False, na=False)
+        jobs_df.loc[is_water_heater, 'Material Cost'] = jobs_df.loc[is_water_heater, 'Material Cost'] - 125.00
+        # Prevent material costs from dipping below $0.00 due to the deduction
+        jobs_df['Material Cost'] = jobs_df['Material Cost'].clip(lower=0.0)
+
+    # Recalculate true net gross profit based on adjusted materials
     jobs_df['Net Gross Profit'] = jobs_df['Total Invoice Amount'] - jobs_df['Material Cost'] - jobs_df['Labor Cost']
 
     # Create tabs for the different modules
@@ -179,7 +190,7 @@ if raw_jobs_df is not None and invoices_df is not None:
     # ---------------------------------------------------------
     with tab2:
         st.header("Financial Performance & Labor Cost Analysis")
-        st.write("This table tracks internal payroll burden and contractor invoice payouts against job material costs.")
+        st.write("This table tracks internal payroll burden and contractor invoice payouts against job material costs (adjusted for built-in estimates).")
         
         if not completed_jobs.empty:
             # Group financial metrics
