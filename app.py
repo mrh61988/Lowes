@@ -17,20 +17,24 @@ st.markdown("""
     <style>
     .metric-card {
         background-color: #f8f9fa;
-        padding: 15px;
-        border-radius: 5px;
+        padding: 20px;
+        border-radius: 8px;
         border-left: 5px solid #007bff;
-        margin-bottom: 10px;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.1);
     }
     .variance-alert {
         color: #d9534f;
+        font-weight: bold;
+    }
+    .success-alert {
+        color: #28a745;
         font-weight: bold;
     }
     </style>
 """, unsafe_allow_html=True)
 
 st.title("📊 Operations & Profitability Dashboard")
-st.markdown("Track contractor profitability, reconcile retail invoices, and detect labor slippage across standard and exception work streams.")
+st.markdown("Track contractor profitability, reconcile retail invoices, audit technician labor slippage, and ensure Lowe's contract compliance.")
 st.markdown("---")
 
 # -----------------------------------------------------------------------------
@@ -62,7 +66,6 @@ if download_error:
     st.sidebar.error(f"❌ Cloud Sync Failed: {download_error}")
 else:
     st.sidebar.success("⚡ Live Pricing Matrices Synced")
-    
     content_dump_1 = str(df_sheet_1.columns.tolist()).lower() + str(df_sheet_1.head(5).values).lower()
     if "bryan" in content_dump_1 or "pickett" in content_dump_1:
         bryan_matrix_df = df_sheet_1
@@ -105,7 +108,6 @@ def lookup_matrix_rate(row, tech_name, current_revenue, erik_mat, bryan_mat, mod
             idx = job_title.find(root_keyword)
             if idx != -1:
                 try:
-                    # Sanitize internal matrix numeric cells just in case they have $ signs
                     raw_rate = str(m_row[payout_col] if mode == "labor" else m_row[inv_col])
                     rate = float(re.sub(r'[^\d.]', '', raw_rate))
                 except:
@@ -151,7 +153,6 @@ uploaded_jobs = st.sidebar.file_uploader("Upload Jobs Full Data CSV", type=["csv
 uploaded_invoices = st.sidebar.file_uploader("Upload Invoices CSV", type=["csv"])
 uploaded_timesheets = st.sidebar.file_uploader("Upload Timesheets CSV", type=["csv"])
 
-# Helper tool to scrub currency symbols out of text
 def sanitize_currency_series(series):
     cleaned = series.astype(str).str.replace(r'[^\d.-]', '', regex=True)
     return pd.to_numeric(cleaned, errors='coerce').fillna(0.0)
@@ -165,7 +166,6 @@ if uploaded_jobs and uploaded_invoices and uploaded_timesheets:
     df_invoices = pd.read_csv(uploaded_invoices)
     df_timesheets = pd.read_csv(uploaded_timesheets)
     
-    # Strip whitespace out of headers
     df_jobs.columns = [c.strip() for c in df_jobs.columns]
     df_invoices.columns = [c.strip() for c in df_invoices.columns]
     df_timesheets.columns = [c.strip() for c in df_timesheets.columns]
@@ -179,11 +179,9 @@ if uploaded_jobs and uploaded_invoices and uploaded_timesheets:
 
     job_cols = list(df_jobs.columns)
 
-    # Inject interactive user overrides inside the sidebar to handle column changes
     st.sidebar.markdown("---")
     with st.sidebar.expander("⚙️ Column Mapping Verification", expanded=True):
-        st.write("Ensure your spreadsheet headers match our selections below:")
-        
+        st.caption("⚠️ If names show as IDs, change the Technician dropdown below to the name column.")
         chosen_rev = st.selectbox("Revenue / Invoiced Column", job_cols, index=find_best_column(['rev', 'tot', 'amt', 'pri', 'bill', 'inv'], job_cols))
         chosen_tech = st.selectbox("Technician Column", job_cols, index=find_best_column(['tech', 'lead', 'emp', 'res', 'assign', 'work', 'name'], job_cols))
         chosen_bu = st.selectbox("Business Unit Column", job_cols, index=find_best_column(['unit', 'dept', 'bu', 'stream', 'cat', 'type'], job_cols))
@@ -191,7 +189,7 @@ if uploaded_jobs and uploaded_invoices and uploaded_timesheets:
         chosen_mat = st.selectbox("Materials Cost Column", job_cols, index=find_best_column(['mat', 'part', 'sup', 'cost', 'exp'], job_cols, fallback_idx=0))
         chosen_title = st.selectbox("Job Title Column", job_cols, index=find_best_column(['tit', 'sum', 'desc', 'name', 'job'], job_cols))
 
-    # Apply choice maps & sanitize string numbers into clean floats
+    # Apply choices
     df_jobs['Revenue'] = sanitize_currency_series(df_jobs[chosen_rev])
     df_jobs['Technician'] = df_jobs[chosen_tech].fillna('Unknown Tech').astype(str)
     df_jobs['Business Unit'] = df_jobs[chosen_bu].fillna('General').astype(str)
@@ -199,7 +197,33 @@ if uploaded_jobs and uploaded_invoices and uploaded_timesheets:
     df_jobs['Materials'] = sanitize_currency_series(df_jobs[chosen_mat])
     df_jobs['Title'] = df_jobs[chosen_title].fillna('').astype(str)
 
-    # Calculate dynamic weekly dates
+    # ⏱️ DYNAMIC WRENCH TIME TIMESTAMP CALCULATION ENGINE
+    # Locate tracking timestamps within jobs export dataset
+    otw_col = next((c for c in df_jobs.columns if 'way' in c.lower() or 'otw' in c.lower()), None)
+    store_col = next((c for c in df_jobs.columns if 'store' in c.lower() or 'lowes' in c.lower()), None)
+    prog_col = next((c for c in df_jobs.columns if 'progress' in c.lower() or 'started' in c.lower()), None)
+    audit_col = next((c for c in df_jobs.columns if 'audit' in c.lower() or 'pending' in c.lower() or 'complete' in c.lower()), None)
+
+    def calculate_wrench_hours(row):
+        try:
+            times = []
+            for col in [otw_col, store_col, prog_col]:
+                if col and pd.notna(row[col]):
+                    times.append(pd.to_datetime(row[col]))
+            
+            if not times or not audit_col or pd.isna(row[audit_col]):
+                return 2.0  # Context Rule: Default to 2 hours if operational data timestamps are missing
+                
+            start_time = min(times)
+            end_time = pd.to_datetime(row[audit_col])
+            duration = (end_time - start_time).total_seconds() / 3600.0
+            return max(0.1, duration)
+        except:
+            return 2.0
+
+    df_jobs['Calculated Wrench Hours'] = df_jobs.apply(calculate_wrench_hours, axis=1)
+
+    # Dynamic date/weeks tracking for salary allocation adjustments
     date_col = next((c for c in df_jobs.columns if 'date' in c.lower()), None)
     if date_col:
         df_jobs[date_col] = pd.to_datetime(df_jobs[date_col], errors='coerce')
@@ -216,7 +240,7 @@ if uploaded_jobs and uploaded_invoices and uploaded_timesheets:
     st.sidebar.info(f"📆 Date range spans **{detected_weeks} week(s)**. Scaling fixed salaries accordingly.")
 
     # -----------------------------------------------------------------------------
-    # FINANCIAL ENGINE CALCULATIONS
+    # FINANCIAL LABORS EXPANSION LOGIC
     # -----------------------------------------------------------------------------
     def calculate_job_metrics(row):
         tech = str(row['Technician']).strip()
@@ -236,7 +260,7 @@ if uploaded_jobs and uploaded_invoices and uploaded_timesheets:
             calculated_payout = lookup_matrix_rate(row, tech, revenue, erik_matrix_df, bryan_matrix_df, mode="labor")
             labor_cost = calculated_payout if calculated_payout is not None else (revenue * 0.34)
         elif 'hourly' in biz_unit or any(n in tech.lower() for n in ['matt', 'tanner', 'edward']):
-            labor_cost = float(row.get('Hours Worked', 0.0)) * 25.0  
+            labor_cost = float(row['Calculated Wrench Hours']) * 25.0  
         elif 'salary' in biz_unit or any(n in tech.lower() for n in ['sean', 'mathew']):
             weekly_salary_burden = 1200.00 
             total_jobs_by_tech = len(df_jobs[df_jobs['Technician'] == tech])
@@ -252,7 +276,7 @@ if uploaded_jobs and uploaded_invoices and uploaded_timesheets:
     df_jobs[['Lowes Cut', 'Net Revenue', 'Calculated Labor', 'Gross Profit']] = df_jobs.apply(calculate_job_metrics, axis=1)
 
     # -----------------------------------------------------------------------------
-    # 6. INTERACTIVE AUDITING WORKSPACE (FOUR FUNCTIONAL TABS)
+    # 6. INTERACTIVE AUDITING WORKSPACE (RESTORED MULTI-TAB VIEW)
     # -----------------------------------------------------------------------------
     tab1, tab2, tab3, tab4 = st.tabs([
         "📈 Executive Dashboard Overview", 
@@ -261,26 +285,68 @@ if uploaded_jobs and uploaded_invoices and uploaded_timesheets:
         "🛒 Lowe's 15% Margin Cut Reconciliation"
     ])
 
-    # TAB 1: EXECUTIVE OVERVIEW
+    # -----------------------------------------------------------------------------
+    # TAB 1: EXECUTIVE DASHBOARD OVERVIEW
+    # -----------------------------------------------------------------------------
     with tab1:
         st.subheader("Key Business Unit Performance Metrics")
-        col1, col2, col3, col4 = st.columns(4)
-        col1.metric("Total Gross Revenue", f"${df_jobs['Revenue'].sum():,.2f}")
-        col2.metric("Net Operational Revenue", f"${df_jobs['Net Revenue'].sum():,.2f}")
-        col3.metric("Calculated Labor Cost", f"${df_jobs['Calculated Labor'].sum():,.2f}")
-        col4.metric("Estimated Gross Profit", f"${df_jobs['Gross Profit'].sum():,.2f}")
+        col1, col2, col3, col4, col5 = st.columns(5)
+        
+        tot_rev = df_jobs['Revenue'].sum()
+        tot_net = df_jobs['Net Revenue'].sum()
+        tot_lab = df_jobs['Calculated Labor'].sum()
+        tot_mat = df_jobs['Materials'].sum()
+        tot_prof = df_jobs['Gross Profit'].sum()
+        
+        col1.metric("Total Gross Revenue", f"${tot_rev:,.2f}")
+        col2.metric("Net Revenue (Post-Cut)", f"${tot_net:,.2f}")
+        col3.metric("Calculated Labor Cost", f"${tot_lab:,.2f}")
+        col4.metric("Material Cost Expenses", f"${tot_mat:,.2f}")
+        col5.metric("Estimated Gross Profit", f"${tot_prof:,.2f}")
         
         st.markdown("---")
         st.subheader("Profitability Breakdown by Working Technician")
-        tech_summary = df_jobs.groupby('Technician').agg({
-            'Revenue': 'sum', 'Net Revenue': 'sum', 'Calculated Labor': 'sum', 'Gross Profit': 'sum'
-        })
-        st.dataframe(tech_summary.style.format("${:,.2f}"))
+        
+        tech_summary = df_jobs.groupby('Technician').agg(
+            Jobs_Completed=('Job ID', 'count'),
+            Gross_Revenue=('Revenue', 'sum'),
+            Net_Revenue=('Net Revenue', 'sum'),
+            Labor_Cost=('Calculated Labor', 'sum'),
+            Material_Cost=('Materials', 'sum'),
+            Net_Profit=('Gross Profit', 'sum')
+        ).reset_index()
+        
+        tech_summary['Profit Margin'] = (tech_summary['Net_Profit'] / tech_summary['Net_Revenue'].replace(0, np.nan)).fillna(0) * 100
+        
+        st.dataframe(
+            tech_summary.style.format({
+                'Gross_Revenue': '${:,.2f}', 'Net_Revenue': '${:,.2f}', 
+                'Labor_Cost': '${:,.2f}', 'Material_Cost': '${:,.2f}', 
+                'Net_Profit': '${:,.2f}', 'Profit Margin': '{:.1f}%'
+            }),
+            use_container_width=True
+        )
 
-    # TAB 2: SIMPLE INSTALLS AUDIT
+        st.markdown("---")
+        st.subheader("Business Unit Performance Breakdown")
+        bu_summary = df_jobs.groupby('Business Unit').agg(
+            Total_Tickets=('Job ID', 'count'),
+            Total_Gross=('Revenue', 'sum'),
+            Total_Net=('Net Revenue', 'sum'),
+            Total_Labor=('Calculated Labor', 'sum'),
+            Estimated_Profit=('Gross Profit', 'sum')
+        ).reset_index()
+        st.dataframe(bu_summary.style.format({
+            'Total_Gross': '${:,.2f}', 'Total_Net': '${:,.2f}', 
+            'Total_Labor': '${:,.2f}', 'Estimated_Profit': '${:,.2f}'
+        }), use_container_width=True)
+
+    # -----------------------------------------------------------------------------
+    # TAB 2: SIMPLE INSTALLS & INVOICE AUDIT
+    # -----------------------------------------------------------------------------
     with tab2:
-        st.subheader("Simple Installs Menu Price Pricing Verification")
-        st.markdown("Flags tickets where actual invoiced values depart from cloud Google Sheet agreements.")
+        st.subheader("Simple Installs Matrix Pricing Verification Table")
+        st.markdown("Validates every ticket against master pricing sheets to check for invoice and billing accuracy.")
         
         audit_records = []
         for idx, row in df_jobs.iterrows():
@@ -290,49 +356,76 @@ if uploaded_jobs and uploaded_invoices and uploaded_timesheets:
             expected_inv = lookup_matrix_rate(row, tech, actual_inv, erik_matrix_df, bryan_matrix_df, mode="invoice")
             variance = actual_inv - expected_inv
             
-            if abs(variance) > 0.01:
-                audit_records.append({
-                    'Job ID': row['Job ID'],
-                    'Technician': tech,
-                    'Job Title': row['Title'],
-                    'Billed Amount': actual_inv,
-                    'Matrix Expected Amount': expected_inv,
-                    'Invoice Variance': variance
-                })
-                
-        if audit_records:
-            st.dataframe(pd.DataFrame(audit_records).style.format({
-                'Billed Amount': '${:,.2f}', 'Matrix Expected Amount': '${:,.2f}', 'Invoice Variance': '${:,.2f}'
-            }))
-        else:
-            st.success("🎉 Compliance Check Passed: All processed simple install items match expected cloud menu matrix prices!")
-
-    # TAB 3: PAYROLL SLIPPAGE LOG
-    with tab3:
-        st.subheader("Wrench Time vs. Clocked Timesheet Alignment")
-        st.markdown("Cross-references recorded timesheet clock hours against dynamic ticket status timestamps to track operational leakage.")
-        
-        df_slippage = df_timesheets.copy()
-        clock_col = next((c for c in df_slippage.columns if 'clock' in c.lower() or 'total' in c.lower()), None)
-        wrench_col = next((c for c in df_slippage.columns if 'wrench' in c.lower() or 'job' in c.lower() or 'actual' in c.lower() or 'log' in c.lower()), None)
-        
-        if clock_col and wrench_col:
-            df_slippage['Clock Hours'] = sanitize_currency_series(df_slippage[clock_col])
-            df_slippage['Wrench Hours'] = sanitize_currency_series(df_slippage[wrench_col])
-            df_slippage['Slippage (Hours)'] = df_slippage['Clock Hours'] - df_slippage['Wrench Hours']
-            df_slippage['Unproductive Payroll Exposure'] = df_slippage['Slippage (Hours)'] * 25.00
+            audit_records.append({
+                'Job ID': row['Job ID'],
+                'Technician': tech,
+                'Job Title': row['Title'],
+                'Billed Amount': actual_inv,
+                'Matrix Expected Amount': expected_inv,
+                'Invoice Variance': variance,
+                'Compliance Status': "⚠️ MISMATCH" if abs(variance) > 0.01 else "✅ MATCH"
+            })
             
-            st.dataframe(df_slippage[['Clock Hours', 'Wrench Hours', 'Slippage (Hours)', 'Unproductive Payroll Exposure']].style.format({
-                'Clock Hours': '{:.2f} hrs', 'Wrench Hours': '{:.2f} hrs', 'Slippage (Hours)': '{:.2f} hrs', 'Unproductive Payroll Exposure': '${:,.2f}'
-            }))
+        df_audit = pd.DataFrame(audit_records)
+        st.dataframe(
+            df_audit.style.format({
+                'Billed Amount': '${:,.2f}', 'Matrix Expected Amount': '${:,.2f}', 'Invoice Variance': '${:,.2f}'
+            }),
+            use_container_width=True
+        )
+        
+        # Display summary calculations
+        mismatches = df_audit[df_audit['Compliance Status'] == "⚠️ MISMATCH"]
+        if not mismatches.empty:
+            st.error(f"⚠️ Found **{len(mismatches)} invoice pricing variances** requiring manual billing review.")
         else:
-            st.warning("Ensure your loaded `timesheets.csv` file contains clear columns mapping to clock hours and wrench time hours.")
-            st.dataframe(df_timesheets)
+            st.success("🎉 All operational items perfectly match agreed pricing matrix baselines!")
 
-    # TAB 4: LOWE'S RECONCILIATION
+    # -----------------------------------------------------------------------------
+    # TAB 3: WRENCH TIME & PAYROLL SLIPPAGE LOG
+    # -----------------------------------------------------------------------------
+    with tab3:
+        st.subheader("Wrench Time vs. Clocked Timesheet Alignment Workspace")
+        st.markdown("Aggregates dynamic customer ticket interaction time frames (OTW to Audit) against logged timesheets.")
+        
+        # Calculate dynamic totals from job tracker for cross referencing
+        tech_wrench = df_jobs.groupby('Technician')['Calculated Wrench Hours'].sum().reset_index()
+        
+        # Search for technician column variants inside timesheet data frame
+        ts_tech_col = next((c for c in df_timesheets.columns if 'tech' in c.lower() or 'name' in c.lower() or 'employee' in c.lower()), None)
+        ts_clock_col = next((c for c in df_timesheets.columns if 'clock' in c.lower() or 'total' in c.lower() or 'hours' in c.lower()), None)
+        
+        if ts_tech_col and ts_clock_col:
+            df_timesheets['Cleaned Clock Hours'] = sanitize_currency_series(df_timesheets[ts_clock_col])
+            ts_summary = df_timesheets.groupby(ts_tech_col)['Cleaned Clock Hours'].sum().reset_index()
+            
+            # Master Merge Join Evaluation
+            df_merge = pd.merge(tech_wrench, ts_summary, left_on='Technician', right_on=ts_tech_col, how='outer').fillna(0.0)
+            df_merge['Labor Slippage (Hours)'] = df_merge['Cleaned Clock Hours'] - df_merge['Calculated Wrench Hours']
+            df_merge['Unproductive Payroll Exposure'] = df_merge['Labor Slippage (Hours)'].apply(lambda x: max(0, x) * 25.00)
+            
+            st.markdown("#### Integrated Labor Leakage Ledger")
+            st.dataframe(
+                df_merge[['Technician', 'Calculated Wrench Hours', 'Cleaned Clock Hours', 'Labor Slippage (Hours)', 'Unproductive Payroll Exposure']].style.format({
+                    'Calculated Wrench Hours': '{:.2f} hrs', 'Cleaned Clock Hours': '{:.2f} hrs',
+                    'Labor Slippage (Hours)': '{:.2f} hrs', 'Unproductive Payroll Exposure': '${:,.2f}'
+                }),
+                use_container_width=True
+            )
+            
+            tot_leakage = df_merge['Unproductive Payroll Exposure'].sum()
+            st.metric("Total Unproductive Payroll Exposure", f"${tot_leakage:,.2f}", delta=f"{df_merge['Labor Slippage (Hours)'].sum():.1f} Lost Hrs", delta_color="inverse")
+        else:
+            st.warning("Could not automatically map matching Technician/Hours inside your `timesheets.csv` file.")
+            st.info("Displaying calculated ticket wrench times for reference:")
+            st.dataframe(tech_wrench)
+
+    # -----------------------------------------------------------------------------
+    # TAB 4: LOWE'S 15% MARGIN CUT RECONCILIATION
+    # -----------------------------------------------------------------------------
     with tab4:
-        st.subheader("Lowe's 15% Contractor Margin Deduction Audit")
-        st.markdown("Isolates standard Water Heater streams subject to institutional cuts while strictly excluding **LA, PA, and RA** exceptions.")
+        st.subheader("Lowe's 15% Contractor Margin Deduction Audit Ledger")
+        st.markdown("Monitors standard Water Heater lines subject to standard 15% retainage while verifying exception rules (**LA, PA, RA**).")
         
         reconciliation_records = []
         applied_cut_col = next((c for c in df_jobs.columns if 'deducted' in c.lower() or 'lowes cut' in c.lower() or 'retainage' in c.lower()), None)
@@ -349,16 +442,33 @@ if uploaded_jobs and uploaded_invoices and uploaded_timesheets:
                 variance = actual_cut_applied - expected_cut
                 
                 reconciliation_records.append({
-                    'Job ID': job_id, 'Work Stream Type': "Exception Stream (Exempt)" if is_exception else "Standard Water Heater",
-                    'Gross Revenue': gross_rev, 'Expected 15% Cut': expected_cut, 'Applied Margin Cut': actual_cut_applied, 'Audit Variance': variance
+                    'Job ID': job_id,
+                    'Technician': row['Technician'],
+                    'Work Stream Category': "Exception Stream (Exempt)" if is_exception else "Standard Water Heater",
+                    'Gross Revenue': gross_rev,
+                    'Expected 15% Cut': expected_cut,
+                    'Applied Margin Cut': actual_cut_applied,
+                    'Audit Variance': variance,
+                    'Status Flag': "✅ Pass" if abs(variance) < 0.01 else "❌ Reconcile"
                 })
                 
         if reconciliation_records:
-            st.dataframe(pd.DataFrame(reconciliation_records).style.format({
-                'Gross Revenue': '${:,.2f}', 'Expected 15% Cut': '${:,.2f}', 'Applied Margin Cut': '${:,.2f}', 'Audit Variance': '${:,.2f}'
-            }))
+            df_rec = pd.DataFrame(reconciliation_records)
+            st.dataframe(
+                df_rec.style.format({
+                    'Gross Revenue': '${:,.2f}', 'Expected 15% Cut': '${:,.2f}', 
+                    'Applied Margin Cut': '${:,.2f}', 'Audit Variance': '${:,.2f}'
+                }),
+                use_container_width=True
+            )
+            
+            errors = len(df_rec[df_rec['Status Flag'] == "❌ Reconcile"])
+            if errors > 0:
+                st.error(f"⚠️ Flagged **{errors} Lowe's compliance variances** due to incorrect exception processing or retainage application.")
+            else:
+                st.success("🎉 Contract compliance checks verified: All margin cuts match exceptions perfectly.")
         else:
-            st.info("No active 'Water Heater' business unit records found in the current filtered data stream.")
+            st.info("No active 'Water Heater' business unit records found in the current uploaded file.")
 
 else:
     st.info("💡 **Welcome to the Workspace Setup:** Please drop your working operational data exports (`jobs`, `invoices`, `timesheets`) into the sidebar panel to activate full dashboard computations. Master contractor pricing profiles are already live-connected to Google Drive.")
