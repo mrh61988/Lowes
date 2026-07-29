@@ -186,11 +186,11 @@ if raw_jobs_df is not None and invoices_df is not None:
             st.warning("No 'Completed' status jobs found.")
 
     # ---------------------------------------------------------
-    # TAB 2: Financial & Labor ROI Metrics (Updated Metric)
+    # TAB 2: Financial & Labor ROI Metrics (Updated Calculation)
     # ---------------------------------------------------------
     with tab2:
         st.header("Financial Performance & Labor Cost Analysis")
-        st.write("This table tracks internal payroll burden and contractor invoice payouts compared against net operational profit.")
+        st.write("This table tracks internal payroll burden and contractor invoice payouts compared against net operational profit metrics.")
         
         if not completed_jobs.empty:
             # Group financial metrics
@@ -202,12 +202,14 @@ if raw_jobs_df is not None and invoices_df is not None:
                 Total_Net_Profit=('Net Gross Profit', 'sum')
             ).reset_index().sort_values('Total_Net_Profit', ascending=False)
             
-            # Metric Change: Calculate Labor Cost relative to Net Profit instead of Revenue
-            fin_metrics['Labor % of Profit'] = (fin_metrics['Total_Labor_Cost'] / fin_metrics['Total_Net_Profit']) * 100
-            # Safety: Replace infinite loops or NaN states from division by zero
-            fin_metrics['Labor % of Profit'] = fin_metrics['Labor % of Profit'].replace([np.inf, -np.inf], np.nan).fillna(0.0)
+            # Metric Change: Calculate Labor Cost / (Revenue - Materials)
+            revenue_minus_materials = fin_metrics['Total_Revenue'] - fin_metrics['Total_Material_Cost']
+            fin_metrics['Labor % of Rev Less Mats'] = (fin_metrics['Total_Labor_Cost'] / revenue_minus_materials) * 100
             
-            fin_metrics.columns = ['Name', 'Jobs Done', 'Gross Revenue', 'Material Costs', 'Labor Cost Burden', 'Net Gross Profit', 'Labor % of Profit']
+            # Safety: Clean infinite values/NaN states from potential division by zero
+            fin_metrics['Labor % of Rev Less Mats'] = fin_metrics['Labor % of Rev Less Mats'].replace([np.inf, -np.inf], np.nan).fillna(0.0)
+            
+            fin_metrics.columns = ['Name', 'Jobs Done', 'Gross Revenue', 'Material Costs', 'Labor Cost Burden', 'Net Gross Profit', 'Labor % of (Rev - Mats)']
             
             st.dataframe(
                 fin_metrics.style.format({
@@ -215,13 +217,13 @@ if raw_jobs_df is not None and invoices_df is not None:
                     'Material Costs': '${:,.2f}',
                     'Labor Cost Burden': '${:,.2f}',
                     'Net Gross Profit': '${:,.2f}',
-                    'Labor % of Profit': '{:.1f}%'
+                    'Labor % of (Rev - Mats)': '{:.1f}%'
                 }),
                 use_container_width=True,
                 hide_index=True
             )
             
-            st.info("💡 **Ops Management Insight:** *Labor % of Profit* measures efficiency by highlighting what portion of your take-home gross profits are absorbed by technician payroll or contractor payouts. Lower percentages represent higher organizational margin retention.")
+            st.info("💡 **Ops Management Insight:** *Labor % of (Rev - Mats)* displays exactly what percentage of your job margin is consumed by labor after paying for equipment/supplies. This accurately captures true labor efficiency independent of material price fluctuations.")
         else:
             st.warning("No completed financial data available to build margins.")
 
