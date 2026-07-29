@@ -15,6 +15,25 @@ st.title("Water Heater & Simple Installs Operations Dashboard")
 st.write("Data filtered exclusively for **Water Heaters** and **Simple Installs** business units. Multi-tech jobs are attributed solely to the primary (first named) technician.")
 
 # ---------------------------------------------------------
+# GLOBAL GEOGRAPHIC SEED DICTIONARY (ARIZONA)
+# ---------------------------------------------------------
+AZ_ZIP_COORDINATES = {
+    '85258': (33.5634, -111.8927), '85750': (32.2980, -110.8449), 
+    '86426': (35.0134, -114.5497), '85286': (33.2715, -111.8316), 
+    '85251': (33.4936, -111.9167), '85741': (32.3472, -111.0419), 
+    '85745': (32.2434, -111.0179), '85138': (33.0073, -111.9324), 
+    '85143': (33.1911, -111.5280), '85308': (33.6539, -112.1694), 
+    '85142': (33.2487, -111.6343), '85204': (33.3992, -111.7896), 
+    '85042': (33.3794, -112.0283), '85326': (33.3519, -112.5908), 
+    '85335': (33.6082, -112.3241), '85224': (33.3301, -111.8632), 
+    '85297': (33.2781, -111.7096), '85044': (33.3291, -111.9943), 
+    '85736': (31.9011, -111.3702), '85255': (33.6860, -111.9020),
+    '85260': (33.6000, -111.8900), '85032': (33.6150, -112.0100),
+    '85304': (33.6100, -112.1800), '85281': (33.4200, -111.9300),
+    '85710': (32.2200, -110.8300), '85712': (32.2500, -110.8900)
+}
+
+# ---------------------------------------------------------
 # TIME FORMATTING HELPER FUNCTION
 # ---------------------------------------------------------
 def format_hours_mins(decimal_hours):
@@ -42,7 +61,7 @@ def load_regional_geojson_boundaries():
     """Streams minified geometric boundary vectors for localized Arizona postal code grids."""
     url = "https://raw.githubusercontent.com/OpenDataDE/State-zip-code-GeoJSON/master/az_arizona_zip_codes_geo.min.json"
     try:
-        req = urllib.request.Request(url, headers={'User-Agent': 'OpsCode_GeoEngine/8.0'})
+        req = urllib.request.Request(url, headers={'User-Agent': 'OpsCode_GeoEngine/9.0'})
         with urllib.request.urlopen(req, timeout=12) as response:
             return json.loads(response.read().decode())
     except Exception:
@@ -62,7 +81,7 @@ def geocode_address_string(address_str):
     encoded_query = urllib.parse.quote(query_string)
     url = f"https://nominatim.openstreetmap.org/search?q={encoded_query}&format=json&limit=1"
     try:
-        req = urllib.request.Request(url, headers={'User-Agent': 'OpsManagerDashboard_Geomap/8.0'})
+        req = urllib.request.Request(url, headers={'User-Agent': 'OpsManagerDashboard_Geomap/9.0'})
         with urllib.request.urlopen(req, timeout=4) as response:
             data = json.loads(response.read().decode())
             if data:
@@ -319,7 +338,6 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
             geo_df['Zip Code'] = geo_df['Zip Code'].astype(str).str.strip().str.replace(r'\.0$', '', regex=True).str.zfill(5)
             geo_df = geo_df[(geo_df['Zip Code'] != '00nan') & (geo_df['Zip Code'] != '00000') & (geo_df['Zip Code'] != '0None')]
 
-        # Guarantee source financial vectors are strictly numeric floats to secure downstream grouping tasks
         if 'Profit Margin' in geo_df.columns:
             geo_df['Profit Margin'] = pd.to_numeric(geo_df['Profit Margin'], errors='coerce').fillna(0.0)
         geo_df['Net Gross Profit'] = pd.to_numeric(geo_df['Net Gross Profit'], errors='coerce').fillna(0.0)
@@ -337,7 +355,8 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
                             return coords[0], coords[1]
                     
                     z_code = str(row.get('Zip Code', '')).strip()
-                    if z_code in AZ_ZIP_COORDINATES:
+                    # Safe fallback wrapper to avoid future NameErrors
+                    if 'AZ_ZIP_COORDINATES' in globals() and z_code in AZ_ZIP_COORDINATES:
                         return AZ_ZIP_COORDINATES[z_code]
                     return np.nan, np.nan
 
@@ -488,7 +507,7 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
             
             st.markdown("---")
             
-            # --- METRICS TABLES (TYPE STABILIZED) ---
+            # --- METRICS TABLES ---
             col3, col4 = st.columns(2)
             with col3:
                 st.subheader("💰 Most Lucrative Zip Codes (Net Profit)")
@@ -498,9 +517,7 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
                     Job_Count=('Zip Code', 'count'), Total_Net_Profit=(profit_col, 'sum')
                 ).reset_index().sort_values('Total_Net_Profit', ascending=False)
                 
-                # STABILIZATION LAYER: Guarantee conversion to clean float series to deny text rendering issues
                 profit_by_zip['Total_Net_Profit'] = profit_by_zip['Total_Net_Profit'].astype(float)
-                
                 st.dataframe(profit_by_zip.style.format({'Total_Net_Profit': '${:,.2f}'}), use_container_width=True, hide_index=True)
             
             with col4:
