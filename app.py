@@ -20,33 +20,54 @@ def format_hours_mins(decimal_hours):
     return f"{hours}:{minutes:02d}"
 
 # ---------------------------------------------------------
-# LABOUR COST CALCULATION ENGINE
+# LABOUR COST CALCULATION ENGINE (WITH CONTRACTOR LOGIC)
 # ---------------------------------------------------------
 def calculate_job_labor_cost(row):
-    tech = row['Assigned Team Members']
+    tech = str(row['Assigned Team Members'])
     duration = row['Job Duration Decimal']
     revenue = row['Total Invoice Amount']
+    bu = str(row['Business Unit'])
     
     # Handle missing or invalid inputs gracefully
     if pd.isna(duration): duration = 0.0
     if pd.isna(revenue): revenue = 0.0
     
-    # Salary Techs (Calculated at 2080 standard annual working hours)
+    # --- 1. INTERNAL SALARIED EMPLOYEES ---
     if tech == 'Sean Marble':
         return duration * (70000 / 2080)
     elif tech == 'Mathew Hodges':
         return duration * (65000 / 2080)
         
-    # Hourly Techs ($25/hr)
+    # --- 2. INTERNAL HOURLY EMPLOYEES ($25/hr) ---
     elif tech in ['Matt Schlosser', 'Tanner LaForge', 'Edward Lopez']:
         return duration * 25.00
         
-    # Commission Techs (34% of Job Revenue)
+    # --- 3. INTERNAL COMMISSION EMPLOYEES (34% of Revenue) ---
     elif tech in ['Erik Tange', 'Bryan Pickett']:
         return revenue * 0.34
         
-    # Default fallback for unconfigured contractors or undefined personnel
+    # --- 4. EXTERNAL CONTRACTORS ENGINE ---
     else:
+        # Detect if worker is a contractor via common name keywords
+        is_contractor = any(k in tech.lower() for k in ['contractor', 'contactor', 'llc', 'ken', 'barber', 'wrench', 'wrentch', 'presidio', 'indian'])
+        
+        if is_contractor:
+            # Rule A: Simple Install jobs pay out total invoice revenue
+            if 'simple installs' in bu.lower():
+                return revenue
+            
+            # Rule B: Water Heater jobs pay specified fixed flat rates
+            elif 'water heaters' in bu.lower():
+                if 'ken' in tech.lower():
+                    return 300.00
+                elif 'barber' in tech.lower():
+                    return 600.00
+                elif 'wrench' in tech.lower() or 'wrentch' in tech.lower():
+                    return 1800.00
+                elif 'indian' in tech.lower() or 'presidio' in tech.lower():
+                    return 600.00
+        
+        # Default fallback for unconfigured accounts
         return 0.0
 
 # ---------------------------------------------------------
@@ -124,7 +145,7 @@ if raw_jobs_df is not None and invoices_df is not None:
         if not completed_jobs.empty:
             col1, col2 = st.columns(2)
             with col1:
-                st.subheader("📋 Volume & Speed by Technician")
+                st.subheader("📋 Volume & Speed by Technician / Contractor")
                 tech_metrics = completed_jobs.groupby('Assigned Team Members').agg(
                     Total_Jobs_Completed=('Status', 'count'),
                     Avg_Duration_Hours=('Job Duration Decimal', 'mean'),
@@ -132,7 +153,7 @@ if raw_jobs_df is not None and invoices_df is not None:
                     Avg_Revenue_Per_Job=('Total Invoice Amount', 'mean')
                 ).reset_index().sort_values('Total_Jobs_Completed', ascending=False)
                 
-                tech_metrics.columns = ['Technician Name', 'Jobs Completed', 'Avg Job Time (H:MM)', 'Total Revenue', 'Avg Revenue/Job']
+                tech_metrics.columns = ['Name', 'Jobs Completed', 'Avg Job Time (H:MM)', 'Total Revenue', 'Avg Revenue/Job']
                 st.dataframe(tech_metrics.style.format({
                     'Avg Job Time (H:MM)': format_hours_mins, 'Total Revenue': '${:,.2f}', 'Avg Revenue/Job': '${:,.2f}'
                 }), use_container_width=True, hide_index=True)
@@ -154,14 +175,14 @@ if raw_jobs_df is not None and invoices_df is not None:
             st.warning("No 'Completed' status jobs found.")
 
     # ---------------------------------------------------------
-    # TAB 2: NEW Financial & Labor ROI Metrics
+    # TAB 2: Financial & Labor ROI Metrics
     # ---------------------------------------------------------
     with tab2:
         st.header("Financial Performance & Labor Cost Analysis")
-        st.write("This table compares total revenue generation against true loaded labor burdens and material overhead costs.")
+        st.write("This table tracks internal payroll burden and contractor invoice payouts against job material costs.")
         
         if not completed_jobs.empty:
-            # Group financial metrics by Technician
+            # Group financial metrics
             fin_metrics = completed_jobs.groupby('Assigned Team Members').agg(
                 Jobs_Completed=('Status', 'count'),
                 Total_Revenue=('Total Invoice Amount', 'sum'),
@@ -170,11 +191,10 @@ if raw_jobs_df is not None and invoices_df is not None:
                 Total_Net_Profit=('Net Gross Profit', 'sum')
             ).reset_index().sort_values('Total_Net_Profit', ascending=False)
             
-            # Calculate the True Labor Percentage metric
             fin_metrics['Labor % of Rev'] = (fin_metrics['Total_Labor_Cost'] / fin_metrics['Total_Revenue']) * 100
             fin_metrics['Labor % of Rev'] = fin_metrics['Labor % of Rev'].fillna(0.0)
             
-            fin_metrics.columns = ['Technician Name', 'Jobs Done', 'Gross Revenue', 'Material Costs', 'Labor Cost Burden', 'Net Gross Profit', 'Labor % of Revenue']
+            fin_metrics.columns = ['Name', 'Jobs Done', 'Gross Revenue', 'Material Costs', 'Labor Cost Burden', 'Net Gross Profit', 'Labor % of Revenue']
             
             st.dataframe(
                 fin_metrics.style.format({
@@ -187,8 +207,6 @@ if raw_jobs_df is not None and invoices_df is not None:
                 use_container_width=True,
                 hide_index=True
             )
-            
-            st.info("💡 **Ops Management Insight:** Hourly and salaried installation technicians usually yield a significantly lower *Labor % of Revenue* compared to the fixed 34% commission tier when volume and execution speeds remain high.")
         else:
             st.warning("No completed financial data available to build margins.")
 
