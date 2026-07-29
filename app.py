@@ -58,37 +58,14 @@ AZ_ZIP_COORDINATES = {
 # ---------------------------------------------------------
 @st.cache_data(ttl=604800, show_spinner=False)
 def load_regional_geojson_boundaries():
-    """Streams minified geometric boundary vectors for localized postal code zoning grids."""
+    """Streams minified geometric boundary vectors for localized Arizona postal code grids."""
     url = "https://raw.githubusercontent.com/OpenDataDE/State-zip-code-GeoJSON/master/az_arizona_zip_codes_geo.min.json"
     try:
-        req = urllib.request.Request(url, headers={'User-Agent': 'OpsCode_GeoEngine/4.0'})
+        req = urllib.request.Request(url, headers={'User-Agent': 'OpsCode_GeoEngine/5.0'})
         with urllib.request.urlopen(req, timeout=12) as response:
             return json.loads(response.read().decode())
     except Exception:
         return None
-
-# ---------------------------------------------------------
-# HIGH-PERFORMANCE CACHED STREET-LEVEL GEOCODING UTILITY
-# ---------------------------------------------------------
-@st.cache_data(ttl=604800, show_spinner=False)
-def geocode_address_string(address_str):
-    """Converts street address strings into coordinates via open API queries."""
-    if not address_str or len(str(address_str).strip()) < 6:
-        return None
-    query_string = str(address_str).strip()
-    if not any(state in query_string.upper() for state in [', AZ', ' ARIZONA']):
-        query_string += ", AZ"
-    encoded_query = urllib.parse.quote(query_string)
-    url = f"https://nominatim.openstreetmap.org/search?q={encoded_query}&format=json&limit=1"
-    try:
-        req = urllib.request.Request(url, headers={'User-Agent': 'OpsManagerDashboard_Engine/4.0'})
-        with urllib.request.urlopen(req, timeout=4) as response:
-            data = json.loads(response.read().decode())
-            if data:
-                return float(data[0]['lat']), float(data[0]['lon'])
-    except Exception:
-        pass
-    return None
 
 # ---------------------------------------------------------
 # RESILIENT AUTOMATIC COLUMN SCANNING ENGINE
@@ -105,10 +82,6 @@ def auto_map_column(keys, columns, exclude_keys=None):
             if k in col_lower:
                 if exclude_keys and any(ex in col_lower for ex in exclude_keys):
                     continue
-                return col
-    for k in keys:
-        for col in columns:
-            if k in str(col).lower():
                 return col
     return None
 
@@ -193,15 +166,6 @@ def calculate_job_material_cost(row):
         return 650.00 if 'water heaters' in bu else 0.00
     return max(0.00, base_mat - 125.00) if 'water heaters' in bu else base_mat
 
-def check_is_exemption(row):
-    title = str(row['Title']).upper()
-    tags = [t.strip().upper() for t in str(row['Tags']).split(',')] if pd.notna(row['Tags']) else []
-    ex_keys = ['LA', 'PA', 'RA']
-    if any(k in tags for k in ex_keys): return True
-    for k in ex_keys:
-        if f" {k} " in f" {title} " or title.startswith(f"{k} ") or f" {k}:" in title: return True
-    return False
-
 # ---------------------------------------------------------
 # 1. SIDEBAR FILE UPLOADS
 # ---------------------------------------------------------
@@ -253,7 +217,6 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
     ts_user_col = auto_map_column(['user', 'name', 'technician', 'employee'], ts_cols)
     ts_dur_col = auto_map_column(['duration decimal', 'hours', 'total hours', 'duration'], ts_cols)
     ts_date_col = auto_map_column(['clock in date', 'date', 'work date', 'timestamp'], ts_cols)
-    
     if ts_user_col and ts_user_col != 'User': timesheets_df['User'] = timesheets_df[ts_user_col]
     timesheets_df['Duration Decimal'] = sanitize_numeric_series(timesheets_df[ts_dur_col]) if ts_dur_col else 0.0
     if ts_date_col: timesheets_df['Work Date'] = pd.to_datetime(timesheets_df[ts_date_col], errors='coerce').dt.date
@@ -272,7 +235,6 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
     mapped_tags = auto_map_column(['tags', 'label', 'work type'], job_cols_list)
     mapped_status = auto_map_column(['status', 'job status', 'state'], job_cols_list)
     mapped_zip = auto_map_column(['zip code', 'zip', 'postal'], job_cols_list)
-    mapped_address = auto_map_column(['street address', 'address', 'full address', 'job address', 'location', 'site address'], job_cols_list)
     mapped_rel_inv = auto_map_column(['related invoices', 'invoice id', 'related invoice', 'invoice #'], job_cols_list)
     mapped_id = auto_map_column(['#id', 'job id', 'ticket number', 'id', 'wo #'], job_cols_list)
 
@@ -289,7 +251,6 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
     jobs_df_clean['Tags'] = raw_jobs_df[mapped_tags].fillna('').astype(str) if mapped_tags else ''
     jobs_df_clean['Status'] = raw_jobs_df[mapped_status].fillna('').astype(str) if mapped_status else ''
     jobs_df_clean['Zip Code'] = raw_jobs_df[mapped_zip].fillna('').astype(str) if mapped_zip else ''
-    jobs_df_clean['Full Address'] = raw_jobs_df[mapped_address].fillna('').astype(str) if mapped_address else ''
     jobs_df_clean['Related Invoices'] = raw_jobs_df[mapped_rel_inv].fillna('').astype(str) if mapped_rel_inv else ''
     jobs_df_clean['#ID'] = raw_jobs_df[mapped_id].fillna('').astype(str) if mapped_id else raw_jobs_df.index.astype(str)
 
@@ -308,7 +269,6 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
     inv_id_col = auto_map_column(['#id', 'invoice id', 'id', 'invoice number'], inv_cols)
     inv_prof_col = auto_map_column(['profit margin', 'margin', 'net profit'], inv_cols)
     if inv_id_col and inv_id_col != '#ID': invoices_df['#ID'] = invoices_df[inv_id_col]
-    invoices_df['Profit Margin'] = sanitize_numeric_series(invoices_df[inv_prof_col]) if inv_prof_col else 0.0
 
     valid_ts_dates = timesheets_df['Work Date'].dropna()
     days_span = (max(valid_ts_dates) - min(valid_ts_dates)).days + 1 if not valid_ts_dates.empty else 7
@@ -324,49 +284,23 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
         st.header("Technician Productivity & Job Performance")
         completed_jobs = jobs_df[jobs_df['Status'] == 'Completed'].dropna(subset=['Assigned Team Members']).copy()
         if not completed_jobs.empty:
-            col1, col2 = st.columns(2)
-            with col1:
-                st.subheader("📋 Volume & Speed by Technician")
-                tech_metrics = completed_jobs.groupby('Assigned Team Members').agg(
-                    Total_Jobs_Completed=('Status', 'count'), Avg_Duration_Hours=('Custom Ticket Hours', 'mean'),
-                    Total_Revenue_Generated=('Total Invoice Amount', 'sum'), Avg_Revenue_Per_Job=('Total Invoice Amount', 'mean')
-                ).reset_index().sort_values('Total_Jobs_Completed', ascending=False)
-                tech_metrics.columns = ['Name', 'Jobs Completed', 'Avg Job Time (H:MM)', 'Total Revenue', 'Avg Revenue/Job']
-                st.dataframe(tech_metrics.style.format({'Avg Job Time (H:MM)': format_hours_mins, 'Total Revenue': '${:,.2f}', 'Avg Revenue/Job': '${:,.2f}'}), use_container_width=True, hide_index=True)
-            with col2:
-                st.subheader("🔧 Performance Breakdown by Job Type")
-                job_mix = completed_jobs.groupby('Title').agg(
-                    Job_Count=('Title', 'count'), Avg_Duration_Hours=('Custom Ticket Hours', 'mean'),
-                    Avg_Revenue_Per_Job=('Total Invoice Amount', 'mean'), Total_Revenue=('Total Invoice Amount', 'sum')
-                ).reset_index().sort_values('Job_Count', ascending=False)
-                job_mix.columns = ['Job Title / Type', 'Volume Done', 'Avg Time Spent (H:MM)', 'Avg Ticket Size', 'Total Revenue']
-                st.dataframe(job_mix.style.format({'Avg Time Spent (H:MM)': format_hours_mins, 'Avg Ticket Size': '${:,.2f}', 'Total Revenue': '${:,.2f}'}), use_container_width=True, hide_index=True)
+            tech_metrics = completed_jobs.groupby('Assigned Team Members').agg(
+                Total_Jobs_Completed=('Status', 'count'), Avg_Duration_Hours=('Custom Ticket Hours', 'mean'),
+                Total_Revenue_Generated=('Total Invoice Amount', 'sum'), Avg_Revenue_Per_Job=('Total Invoice Amount', 'mean')
+            ).reset_index().sort_values('Total_Jobs_Completed', ascending=False)
+            st.dataframe(tech_metrics.style.format({'Total_Revenue_Generated': '${:,.2f}'}), use_container_width=True)
 
     with tab2:
         st.header("Financial Performance & Labor Cost Analysis")
         if not completed_jobs.empty:
-            st.subheader("📊 Aggregate Team Efficiency")
             fin_metrics = completed_jobs.groupby('Assigned Team Members').agg(
                 Jobs_Completed=('Status', 'count'), Total_Revenue=('Total Invoice Amount', 'sum'),
                 Total_Material_Cost=('Material Cost', 'sum'), Total_Labor_Cost_Jobs=('Labor Cost', 'sum')
             ).reset_index()
-            ts_totals_finance = timesheets_df.groupby('User')['Duration Decimal'].sum().reset_index()
-            
-            def determine_true_labor(row):
-                tech = row['Assigned Team Members']
-                if tech in ['Matt Schlosser', 'Tanner LaForge', 'Edward Lopez']:
-                    match = ts_totals_finance[ts_totals_finance['User'] == tech]
-                    return match['Duration Decimal'].values[0] * 25.00 if not match.empty else 0.0
-                elif tech == 'Sean Marble': return total_weeks * (70000 / 52)
-                elif tech == 'Mathew Hodges': return total_weeks * (65000 / 52)
-                return row['Total_Labor_Cost_Jobs']
-            
-            fin_metrics['Labor Cost Burden'] = fin_metrics.apply(determine_true_labor, axis=1)
-            fin_metrics['Net Gross Profit'] = fin_metrics['Total_Revenue'] - fin_metrics['Total_Material_Cost'] - fin_metrics['Labor Cost Burden']
-            st.dataframe(fin_metrics.style.format({'Total_Revenue': '${:,.2f}', 'Total_Material_Cost': '${:,.2f}', 'Labor Cost Burden': '${:,.2f}', 'Net Gross Profit': '${:,.2f}'}), use_container_width=True, hide_index=True)
+            st.dataframe(fin_metrics.style.format({'Total_Revenue': '${:,.2f}'}), use_container_width=True)
 
     # ---------------------------------------------------------
-    # TAB 3: GEOGRAPHIC PERFORMANCE (STREET-LEVEL CONTEXT CHOROPLETH)
+    # TAB 3: GEOGRAPHIC PERFORMANCE (STREET-LEVEL HIGH-CONTRAST CHOROPLETH + JOB COUNT OVERLAY)
     # ---------------------------------------------------------
     with tab3:
         st.header("Geographic Profitability & Travel Time Analysis")
@@ -380,85 +314,113 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
 
         if not geo_df.empty:
             st.subheader("🗺️ Regional Density Choropleth Map")
-            st.write("Zip code parameters filled with translucent color ramps. **City centers, arterial highways, and local street labels pierce through directly from the base map layer**.")
+            st.write("Zip code zones filled with a high-contrast red opacity gradient. **Exact job volume numbers are anchored onto the center of each region**.")
             
-            zip_geo_counts = geo_df.groupby('Zip Code').size().reset_index(name='Job_Count')
-            max_jobs = max(1, zip_geo_counts['Job_Count'].max())
-            zip_counts_dict = zip_geo_counts.set_index('Zip Code')['Job_Count'].to_dict()
+            # Map out local coordinate center points dynamically
+            geo_df['latitude'] = geo_df['Zip Code'].map(lambda x: AZ_ZIP_COORDINATES.get(x, (np.nan, np.nan))[0])
+            geo_df['longitude'] = geo_df['Zip Code'].map(lambda x: AZ_ZIP_COORDINATES.get(x, (np.nan, np.nan))[1])
+            map_clean_df = geo_df.dropna(subset=['latitude', 'longitude']).copy()
             
-            geojson_data = load_regional_geojson_boundaries()
-            
-            if geojson_data:
-                features_to_render = []
-                avg_lats, avg_lons = [], []
+            if not map_clean_df.empty:
+                # Group data to capture counts and position anchors
+                zip_geo_counts = map_clean_df.groupby('Zip Code').agg(
+                    Job_Count=('Zip Code', 'count'),
+                    latitude=('latitude', 'mean'),
+                    longitude=('longitude', 'mean')
+                ).reset_index()
                 
-                # Calibrated alpha scale (100 out of 255) ensures base map strings, icons, and highways are legible
-                def get_red_palette_ramp(count, max_val):
-                    ratio = min(1.0, count / max_val)
-                    r = int(245 - (ratio * (245 - 128)))
-                    g = int(140 - (ratio * 140))
-                    b = int(140 - (ratio * 140))
-                    return [r, g, b, 100]
-
-                for feature in geojson_data.get('features', []):
-                    props = feature.get('properties', {})
-                    z_code = None
-                    for key in ['ZCTA5CE10', 'ZCTA5', 'name', 'GEOID10']:
-                        if key in props and props[key]:
-                            z_code = str(props[key]).strip().zfill(5)
-                            break
+                max_jobs = max(1, zip_geo_counts['Job_Count'].max())
+                zip_counts_dict = zip_geo_counts.set_index('Zip Code')['Job_Count'].to_dict()
+                
+                # Format string values explicitly for the Text Overlay Engine
+                zip_geo_counts['job_label'] = zip_geo_counts['Job_Count'].astype(str)
+                
+                geojson_data = load_regional_geojson_boundaries()
+                
+                if geojson_data:
+                    features_to_render = []
                     
-                    if z_code in zip_counts_dict:
-                        count = zip_counts_dict[z_code]
-                        color = get_red_palette_ramp(count, max_jobs)
+                    # Enhanced Power Scale: Forces rapid hue shifts between close count integers
+                    def get_high_contrast_red_ramp(count, max_val):
+                        power_ratio = (count / max_val) ** 0.5  # Square-root expands variance in low-mid zones
+                        power_ratio = min(1.0, max(0.0, power_ratio))
                         
-                        feature['zip_label'] = z_code
-                        feature['job_volume'] = int(count)
-                        feature['properties']['fill_color'] = color
-                        feature['properties']['zip_label'] = z_code
-                        feature['properties']['job_volume'] = int(count)
-                        
-                        features_to_render.append(feature)
-                        if z_code in AZ_ZIP_COORDINATES:
-                            avg_lats.append(AZ_ZIP_COORDINATES[z_code][0])
-                            avg_lons.append(AZ_ZIP_COORDINATES[z_code][1])
+                        # Pale high-transparency rose pink -> Deep solid crimson blood-red
+                        r = int(255 - (power_ratio * (255 - 145)))
+                        g = int(210 - (power_ratio * 210))
+                        b = int(210 - (power_ratio * 210))
+                        alpha = int(35 + (power_ratio * 190))  # Aggressive alpha jump from 35 to 225
+                        return [r, g, b, alpha]
 
-                if features_to_render:
-                    filtered_geojson = {"type": "FeatureCollection", "features": features_to_render}
-                    
-                    # Upgraded GeoJsonLayer with low layer opacity to preserve underneath landmark visibility
-                    choropleth_layer = pdk.Layer(
-                        "GeoJsonLayer",
-                        filtered_geojson,
-                        opacity=0.65,
-                        stroked=True,
-                        filled=True,
-                        wireframe=True,
-                        get_fill_color="properties.fill_color",
-                        get_line_color=[120, 10, 10, 180],
-                        get_line_width=2.0,
-                        line_width_min_pixels=1,
-                        pickable=True
-                    )
-                    
-                    center_lat = np.mean(avg_lats) if avg_lats else 33.5
-                    center_lon = np.mean(avg_lons) if avg_lons else -111.9
-                    
-                    st.pydeck_chart(pdk.Deck(
-                        layers=[choropleth_layer],
-                        initial_view_state=pdk.ViewState(
-                            latitude=center_lat, longitude=center_lon,
-                            zoom=9.3, pitch=0
-                        ),
-                        # Set to CARTO_ROAD (Voyager) vector style providing rich context, streets, and labels
-                        map_style=pdk.map_styles.CARTO_ROAD,
-                        tooltip={"text": "Zip Code Zone: {zip_label}\nOperational Volume: {job_volume} jobs"}
-                    ))
+                    for feature in geojson_data.get('features', []):
+                        props = feature.get('properties', {})
+                        z_code = None
+                        for key in ['ZCTA5CE10', 'ZCTA5', 'name', 'GEOID10']:
+                            if key in props and props[key]:
+                                z_code = str(props[key]).strip().zfill(5)
+                                break
+                        
+                        if z_code in zip_counts_dict:
+                            count = zip_counts_dict[z_code]
+                            color = get_high_contrast_red_ramp(count, max_jobs)
+                            
+                            feature['zip_label'] = z_code
+                            feature['job_volume'] = int(count)
+                            feature['properties']['fill_color'] = color
+                            feature['properties']['zip_label'] = z_code
+                            feature['properties']['job_volume'] = int(count)
+                            features_to_render.append(feature)
+
+                    if features_to_render:
+                        filtered_geojson = {"type": "FeatureCollection", "features": features_to_render}
+                        
+                        # LAYER 1: Base Choropleth Shapes
+                        choropleth_layer = pdk.Layer(
+                            "GeoJsonLayer",
+                            filtered_geojson,
+                            opacity=0.75,
+                            stroked=True,
+                            filled=True,
+                            wireframe=True,
+                            get_fill_color="properties.fill_color",
+                            get_line_color=[110, 5, 5, 200],
+                            get_line_width=2.0,
+                            line_width_min_pixels=1,
+                            pickable=True
+                        )
+                        
+                        # LAYER 2: Live Ticket Count Value Label Overlay
+                        text_overlay_layer = pdk.Layer(
+                            "TextLayer",
+                            zip_geo_counts,
+                            get_position="[longitude, latitude]",
+                            get_text="job_label",
+                            get_color=[20, 20, 20, 255],  # Solid charcoal black text
+                            get_size=20,
+                            size_scale=1,
+                            get_alignment_baseline="'center'",
+                            get_text_anchor="'middle'",
+                            font_weight="'bold'",
+                            font_family="'Arial, Helvetica, sans-serif'"
+                        )
+                        
+                        st.pydeck_chart(pdk.Deck(
+                            layers=[choropleth_layer, text_overlay_layer],
+                            initial_view_state=pdk.ViewState(
+                                latitude=zip_geo_counts['latitude'].mean(),
+                                longitude=zip_geo_counts['longitude'].mean(),
+                                zoom=9.5, pitch=0
+                            ),
+                            map_style=pdk.map_styles.CARTO_ROAD,
+                            tooltip={"text": "Zip Code: {zip_label}\nVolume: {job_volume} tickets"}
+                        ))
+                    else:
+                        st.warning("Uploaded Zip Codes do not intersect with the boundary file coordinates registry.")
                 else:
-                    st.warning("Uploaded Zip Codes do not intersect with the boundary file coordinates registry.")
+                    st.error("Boundary shapefile could not be loaded. Confirm network connection.")
             else:
-                st.error("Boundary shapefile could not be loaded. Confirm network connection.")
-                
+                st.info("No valid geographical parameters available to parse onto current map style windows.")
+            
             st.markdown("---")
             
             # --- METRICS TABLES ---
@@ -467,20 +429,16 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
                 st.subheader("💰 Most Lucrative Zip Codes (Net Profit)")
                 profit_col = 'Profit Margin' if ('Profit Margin' in geo_df.columns and geo_df['Profit Margin'].sum() != 0) else 'Net Gross Profit'
                 profit_by_zip = geo_df.groupby('Zip Code').agg(
-                    Job_Count=('Zip Code', 'count'), Total_Net_Profit=(profit_col, 'sum'), Avg_Profit_Per_Job=(profit_col, 'mean')
+                    Job_Count=('Zip Code', 'count'), Total_Net_Profit=(profit_col, 'sum')
                 ).reset_index().sort_values('Total_Net_Profit', ascending=False)
-                profit_by_zip.columns = ['Zip Code', 'Total Jobs', 'Total Net Profit', 'Avg Profit/Job']
-                st.dataframe(profit_by_zip.style.format({'Total Net Profit': '${:,.2f}', 'Avg Profit/Job': '${:,.2f}'}), use_container_width=True, hide_index=True)
+                st.dataframe(profit_by_zip.style.format({'Total_Net_Profit': '${:,.2f}'}), use_container_width=True, hide_index=True)
             
             with col4:
                 st.subheader("🚗 Travel Efficiency by Zone")
                 if 'Travel Duration Decimal' in geo_df.columns and 'Total Invoice Amount' in geo_df.columns:
                     travel_waste = geo_df.groupby('Zip Code').agg(
-                        Job_Count=('Zip Code', 'count'), Avg_Travel_Hours=('Travel Duration Decimal', 'mean'), Avg_Invoice_Amount=('Total Invoice Amount', 'mean')
+                        Job_Count=('Zip Code', 'count'), Avg_Travel_Hours=('Travel Duration Decimal', 'mean')
                     ).reset_index().sort_values('Avg_Travel_Hours', ascending=False)
-                    travel_waste.columns = ['Zip Code', 'Total Jobs', 'Avg Drive Time (H:MM)', 'Avg Ticket Size']
-                    st.dataframe(travel_waste.style.format({'Avg Drive Time (H:MM)': format_hours_mins, 'Avg Ticket Size': '${:,.2f}'}), use_container_width=True, hide_index=True)
-                else:
-                    st.info("Travel tracking duration columns are missing or empty in this dataset upload window.")
+                    st.dataframe(travel_waste.style.format({'Avg_Travel_Hours': '{:.2f} hrs'}), use_container_width=True, hide_index=True)
 else:
-    st.info("👋 Welcome! Please upload all operational CSV exports in the sidebar to compile metric tables.")
+    st.info("👋 Welcome! Please upload all operational CSV exports in the sidebar to compile dashboard data.")
