@@ -157,6 +157,28 @@ def sanitize_currency_series(series):
     cleaned = series.astype(str).str.replace(r'[^\d.-]', '', regex=True)
     return pd.to_numeric(cleaned, errors='coerce').fillna(0.0)
 
+# --- RESILIENT AUTOMATIC COLUMN SCANNING ENGINE ---
+def auto_map_column(keys, columns, exclude_keys=None):
+    columns_lower = [c.lower() for c in columns]
+    # Priority 1: Direct exact match match
+    for k in keys:
+        if k in columns_lower:
+            return columns[columns_lower.index(k)]
+    # Priority 2: Safe contextual wildcard match (excludes tracking codes/IDs)
+    for k in keys:
+        for col in columns:
+            col_lower = col.lower()
+            if k in col_lower:
+                if exclude_keys and any(ex in col_lower for ex in exclude_keys):
+                    continue
+                return col
+    # Priority 3: Global fallback matching
+    for k in keys:
+        for col in columns:
+            if k in col.lower():
+                return col
+    return columns[0]
+
 # -----------------------------------------------------------------------------
 # 5. DATA PROCESSING & INGESTION RECONCILIATION
 # -----------------------------------------------------------------------------
@@ -170,26 +192,17 @@ if uploaded_jobs and uploaded_invoices and uploaded_timesheets:
     df_invoices.columns = [c.strip() for c in df_invoices.columns]
     df_timesheets.columns = [c.strip() for c in df_timesheets.columns]
     
-    # --- WILDCARD AUTO-DETECTION ENGINE ---
-    def find_best_column(keys, columns, fallback_idx=0):
-        for idx, col in enumerate(columns):
-            if any(k in col.lower() for k in keys):
-                return idx
-        return fallback_idx
-
     job_cols = list(df_jobs.columns)
 
-    st.sidebar.markdown("---")
-    with st.sidebar.expander("⚙️ Column Mapping Verification", expanded=True):
-        st.caption("⚠️ If names show as IDs, change the Technician dropdown below to the name column.")
-        chosen_rev = st.selectbox("Revenue / Invoiced Column", job_cols, index=find_best_column(['rev', 'tot', 'amt', 'pri', 'bill', 'inv'], job_cols))
-        chosen_tech = st.selectbox("Technician Column", job_cols, index=find_best_column(['tech', 'lead', 'emp', 'res', 'assign', 'work', 'name'], job_cols))
-        chosen_bu = st.selectbox("Business Unit Column", job_cols, index=find_best_column(['unit', 'dept', 'bu', 'stream', 'cat', 'type'], job_cols))
-        chosen_id = st.selectbox("Job ID Column", job_cols, index=find_best_column(['id', 'num', 'tick', 'job', '#'], job_cols))
-        chosen_mat = st.selectbox("Materials Cost Column", job_cols, index=find_best_column(['mat', 'part', 'sup', 'cost', 'exp'], job_cols, fallback_idx=0))
-        chosen_title = st.selectbox("Job Title Column", job_cols, index=find_best_column(['tit', 'sum', 'desc', 'name', 'job'], job_cols))
+    # Automatically map fields behind the scenes cleanly
+    chosen_rev = auto_map_column(['revenue', 'invoice total', 'amount', 'total', 'gross', 'price', 'billed'], job_cols)
+    chosen_tech = auto_map_column(['technician', 'lead tech', 'resource', 'employee', 'worker', 'name', 'tech'], job_cols, exclude_keys=['id', '#', 'num'])
+    chosen_bu = auto_map_column(['business unit', 'department', 'bu', 'stream', 'category', 'type'], job_cols)
+    chosen_id = auto_map_column(['job id', 'ticket number', 'ticket', 'job #', 'id', 'wo', 'work order'], job_cols)
+    chosen_mat = auto_map_column(['materials', 'material cost', 'parts', 'supply', 'expense'], job_cols)
+    chosen_title = auto_map_column(['title', 'job title', 'summary', 'description'], job_cols)
 
-    # Apply choices
+    # Commit structural mappings & sanitize pricing inputs
     df_jobs['Revenue'] = sanitize_currency_series(df_jobs[chosen_rev])
     df_jobs['Technician'] = df_jobs[chosen_tech].fillna('Unknown Tech').astype(str)
     df_jobs['Business Unit'] = df_jobs[chosen_bu].fillna('General').astype(str)
@@ -197,8 +210,7 @@ if uploaded_jobs and uploaded_invoices and uploaded_timesheets:
     df_jobs['Materials'] = sanitize_currency_series(df_jobs[chosen_mat])
     df_jobs['Title'] = df_jobs[chosen_title].fillna('').astype(str)
 
-    # ⏱️ DYNAMIC WRENCH TIME TIMESTAMP CALCULATION ENGINE
-    # Locate tracking timestamps within jobs export dataset
+    # WRENCH TIME TIMESTAMP ENGINE
     otw_col = next((c for c in df_jobs.columns if 'way' in c.lower() or 'otw' in c.lower()), None)
     store_col = next((c for c in df_jobs.columns if 'store' in c.lower() or 'lowes' in c.lower()), None)
     prog_col = next((c for c in df_jobs.columns if 'progress' in c.lower() or 'started' in c.lower()), None)
@@ -212,7 +224,7 @@ if uploaded_jobs and uploaded_invoices and uploaded_timesheets:
                     times.append(pd.to_datetime(row[col]))
             
             if not times or not audit_col or pd.isna(row[audit_col]):
-                return 2.0  # Context Rule: Default to 2 hours if operational data timestamps are missing
+                return 2.0  
                 
             start_time = min(times)
             end_time = pd.to_datetime(row[audit_col])
@@ -223,7 +235,7 @@ if uploaded_jobs and uploaded_invoices and uploaded_timesheets:
 
     df_jobs['Calculated Wrench Hours'] = df_jobs.apply(calculate_wrench_hours, axis=1)
 
-    # Dynamic date/weeks tracking for salary allocation adjustments
+    # Date ranges scale engine
     date_col = next((c for c in df_jobs.columns if 'date' in c.lower()), None)
     if date_col:
         df_jobs[date_col] = pd.to_datetime(df_jobs[date_col], errors='coerce')
@@ -237,7 +249,7 @@ if uploaded_jobs and uploaded_invoices and uploaded_timesheets:
     else:
         detected_weeks = 1
         
-    st.sidebar.info(f"📆 Date range spans **{detected_weeks} week(s)**. Scaling fixed salaries accordingly.")
+    st.sidebar.info(f"📆 Auto-Detected Span: **{detected_weeks} week(s)**.")
 
     # -----------------------------------------------------------------------------
     # FINANCIAL LABORS EXPANSION LOGIC
@@ -285,9 +297,7 @@ if uploaded_jobs and uploaded_invoices and uploaded_timesheets:
         "🛒 Lowe's 15% Margin Cut Reconciliation"
     ])
 
-    # -----------------------------------------------------------------------------
     # TAB 1: EXECUTIVE DASHBOARD OVERVIEW
-    # -----------------------------------------------------------------------------
     with tab1:
         st.subheader("Key Business Unit Performance Metrics")
         col1, col2, col3, col4, col5 = st.columns(5)
@@ -341,9 +351,7 @@ if uploaded_jobs and uploaded_invoices and uploaded_timesheets:
             'Total_Labor': '${:,.2f}', 'Estimated_Profit': '${:,.2f}'
         }), use_container_width=True)
 
-    # -----------------------------------------------------------------------------
     # TAB 2: SIMPLE INSTALLS & INVOICE AUDIT
-    # -----------------------------------------------------------------------------
     with tab2:
         st.subheader("Simple Installs Matrix Pricing Verification Table")
         st.markdown("Validates every ticket against master pricing sheets to check for invoice and billing accuracy.")
@@ -374,24 +382,19 @@ if uploaded_jobs and uploaded_invoices and uploaded_timesheets:
             use_container_width=True
         )
         
-        # Display summary calculations
         mismatches = df_audit[df_audit['Compliance Status'] == "⚠️ MISMATCH"]
         if not mismatches.empty:
             st.error(f"⚠️ Found **{len(mismatches)} invoice pricing variances** requiring manual billing review.")
         else:
             st.success("🎉 All operational items perfectly match agreed pricing matrix baselines!")
 
-    # -----------------------------------------------------------------------------
     # TAB 3: WRENCH TIME & PAYROLL SLIPPAGE LOG
-    # -----------------------------------------------------------------------------
     with tab3:
         st.subheader("Wrench Time vs. Clocked Timesheet Alignment Workspace")
         st.markdown("Aggregates dynamic customer ticket interaction time frames (OTW to Audit) against logged timesheets.")
         
-        # Calculate dynamic totals from job tracker for cross referencing
         tech_wrench = df_jobs.groupby('Technician')['Calculated Wrench Hours'].sum().reset_index()
         
-        # Search for technician column variants inside timesheet data frame
         ts_tech_col = next((c for c in df_timesheets.columns if 'tech' in c.lower() or 'name' in c.lower() or 'employee' in c.lower()), None)
         ts_clock_col = next((c for c in df_timesheets.columns if 'clock' in c.lower() or 'total' in c.lower() or 'hours' in c.lower()), None)
         
@@ -399,7 +402,6 @@ if uploaded_jobs and uploaded_invoices and uploaded_timesheets:
             df_timesheets['Cleaned Clock Hours'] = sanitize_currency_series(df_timesheets[ts_clock_col])
             ts_summary = df_timesheets.groupby(ts_tech_col)['Cleaned Clock Hours'].sum().reset_index()
             
-            # Master Merge Join Evaluation
             df_merge = pd.merge(tech_wrench, ts_summary, left_on='Technician', right_on=ts_tech_col, how='outer').fillna(0.0)
             df_merge['Labor Slippage (Hours)'] = df_merge['Cleaned Clock Hours'] - df_merge['Calculated Wrench Hours']
             df_merge['Unproductive Payroll Exposure'] = df_merge['Labor Slippage (Hours)'].apply(lambda x: max(0, x) * 25.00)
@@ -417,12 +419,9 @@ if uploaded_jobs and uploaded_invoices and uploaded_timesheets:
             st.metric("Total Unproductive Payroll Exposure", f"${tot_leakage:,.2f}", delta=f"{df_merge['Labor Slippage (Hours)'].sum():.1f} Lost Hrs", delta_color="inverse")
         else:
             st.warning("Could not automatically map matching Technician/Hours inside your `timesheets.csv` file.")
-            st.info("Displaying calculated ticket wrench times for reference:")
             st.dataframe(tech_wrench)
 
-    # -----------------------------------------------------------------------------
     # TAB 4: LOWE'S 15% MARGIN CUT RECONCILIATION
-    # -----------------------------------------------------------------------------
     with tab4:
         st.subheader("Lowe's 15% Contractor Margin Deduction Audit Ledger")
         st.markdown("Monitors standard Water Heater lines subject to standard 15% retainage while verifying exception rules (**LA, PA, RA**).")
@@ -464,7 +463,7 @@ if uploaded_jobs and uploaded_invoices and uploaded_timesheets:
             
             errors = len(df_rec[df_rec['Status Flag'] == "❌ Reconcile"])
             if errors > 0:
-                st.error(f"⚠️ Flagged **{errors} Lowe's compliance variances** due to incorrect exception processing or retainage application.")
+                st.error(f"⚠️ Flagged **{errors} Lowe's compliance variances** due to incorrect exception processing.")
             else:
                 st.success("🎉 Contract compliance checks verified: All margin cuts match exceptions perfectly.")
         else:
