@@ -21,18 +21,66 @@ def format_hours_mins(decimal_hours):
     return f"{hours}:{minutes:02d}"
 
 # ---------------------------------------------------------
+# DYNAMIC ON-TICKET TIME CALCULATOR ENGINE
+# ---------------------------------------------------------
+def compute_custom_ticket_hours(row, cols):
+    """
+    Calculates ticket duration based on workflow status timestamps.
+    Start Time: Earliest of 'On The Way', 'Lowes Store', or 'In Progress'.
+    End Time: 'Pending Audit'.
+    Edge Case 1: Missing start data defaults to 2.0 hours.
+    Edge Case 2: Multiple visits select the absolute earliest start milestone.
+    """
+    start_times = []
+    end_times = []
+    
+    # Iterate via integer indexes to avoid duplicate string header evaluation issues
+    for idx, col_name in enumerate(cols):
+        val = row.iloc[idx]
+        if pd.isna(val) or str(val).strip() in ['', '-']:
+            continue
+            
+        # Target Start Milestones
+        if col_name in ['On The Way - Start Timestamp', 'Lowes Store - Start Timestamp', 'In Progress - Start Timestamp']:
+            t = pd.to_datetime(val, errors='coerce')
+            if pd.notna(t):
+                start_times.append(t)
+                
+        # Target End Milestone
+        if col_name == 'Pending Audit - Start Timestamp':
+            t = pd.to_datetime(val, errors='coerce')
+            if pd.notna(t):
+                end_times.append(t)
+                
+    # If there is no end timestamp logged, the job cannot be evaluated on this timeline
+    if not end_times:
+        return 0.0
+        
+    latest_end = max(end_times)
+    
+    # Edge Case 1: Straight to Audit without any start milestones -> Default to 2 hours
+    if not start_times:
+        return 2.0
+        
+    # Edge Case 2: Multiple milestones logged -> Select the absolute earliest timestamp
+    earliest_start = min(start_times)
+    
+    duration = (latest_end - earliest_start).total_seconds() / 3600.0
+    return max(0.0, duration)
+
+# ---------------------------------------------------------
 # LABOUR COST CALCULATION ENGINE (JOB TICKETS)
 # ---------------------------------------------------------
 def calculate_job_labor_cost(row):
     tech = str(row['Assigned Team Members'])
-    duration = row['Job Duration Decimal']
+    duration = row['Custom Ticket Hours']  # Now powered by custom timestamp durations
     revenue = row['Total Invoice Amount']
     bu = str(row['Business Unit'])
     
     if pd.isna(duration): duration = 0.0
     if pd.isna(revenue): revenue = 0.0
     
-    # Internal Salaried Staff (High-level allocation for job rows)
+    # Internal Salaried Staff
     if tech == 'Sean Marble':
         return duration * (70000 / 2080)
     elif tech == 'Mathew Hodges':
@@ -73,15 +121,12 @@ def calculate_job_material_cost(row):
     is_contractor = any(k in tech for k in ['contractor', 'contactor', 'llc', 'ken', 'barber', 'wrench', 'wrentch', 'presidio', 'indian'])
     
     if is_contractor:
-        # Rule 1: No materials costs for contractors on Simple Installs
         if 'simple installs' in bu:
             return 0.00
-        # Rule 2: Hardcoded $650 material override for contractors on Water Heaters
         elif 'water heaters' in bu:
             return 650.00
         return base_mat
     else:
-        # Internal crews rules: Deduct $125 built-in labor cushion from Water Heater jobs
         if 'water heaters' in bu:
             return max(0.00, base_mat - 125.00)
         return base_mat
@@ -140,14 +185,18 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
     for col in numeric_cols_jobs:
         if col in jobs_df.columns:
             jobs_df[col] = pd.to_numeric(jobs_df[col], errors='coerce').fillna(0.0)
-            
+
+    # Compute Custom On-Ticket Hours via Status Timestamps
+    column_headers = jobs_df.columns.tolist()
+    jobs_df['Custom Ticket Hours'] = jobs_df.apply(lambda r: compute_custom_ticket_hours(r, column_headers), axis=1)
+
     if 'Start Date' in jobs_df.columns:
         jobs_df['Start Date'] = pd.to_datetime(jobs_df['Start Date'], errors='coerce')
 
     if 'Profit Margin' in invoices_df.columns:
         invoices_df['Profit Margin'] = pd.to_numeric(invoices_df['Profit Margin'], errors='coerce').fillna(0.0)
 
-    # Apply Engines
+    # Apply Cost Engines
     jobs_df['Labor Cost'] = jobs_df.apply(calculate_job_labor_cost, axis=1)
     jobs_df['Material Cost'] = jobs_df.apply(calculate_job_material_cost, axis=1)
     jobs_df['Net Gross Profit'] = jobs_df['Total Invoice Amount'] - jobs_df['Material Cost'] - jobs_df['Labor Cost']
@@ -168,7 +217,7 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
                 st.subheader("📋 Volume & Speed by Technician / Contractor")
                 tech_metrics = completed_jobs.groupby('Assigned Team Members').agg(
                     Total_Jobs_Completed=('Status', 'count'),
-                    Avg_Duration_Hours=('Job Duration Decimal', 'mean'),
+                    Avg_Duration_Hours=('Custom Ticket Hours', 'mean'),  # Swapped out for parsed timestamps
                     Total_Revenue_Generated=('Total Invoice Amount', 'sum'),
                     Avg_Revenue_Per_Job=('Total Invoice Amount', 'mean')
                 ).reset_index().sort_values('Total_Jobs_Completed', ascending=False)
@@ -182,7 +231,7 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
                 st.subheader("🔧 Performance Breakdown by Job Type")
                 job_mix = completed_jobs.groupby('Title').agg(
                     Job_Count=('Title', 'count'),
-                    Avg_Duration_Hours=('Job Duration Decimal', 'mean'),
+                    Avg_Duration_Hours=('Custom Ticket Hours', 'mean'),  # Swapped out for parsed timestamps
                     Avg_Revenue_Per_Job=('Total Invoice Amount', 'mean'),
                     Total_Revenue=('Total Invoice Amount', 'sum')
                 ).reset_index().sort_values('Job_Count', ascending=False)
@@ -195,17 +244,17 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
             st.write("---")
             
             # ---------------------------------------------------------
-            # FIXED TABLE: CLOCK HOURS VS TICKET HOURS AUDITING LOG
+            # AUDITING LOG WITH TIMESTAMP VARIANCE LOGIC
             # ---------------------------------------------------------
             st.subheader("⏰ Clock Hours vs. Ticket Hours Auditing Log")
-            st.write("Exposes unallocated time by contrasting total clocked timesheet hours against direct billable job durations.")
+            st.write("Exposes unallocated time by contrasting total clocked timesheet hours against status timestamp durations.")
             
             ts_totals_audit = timesheets_df.groupby('User')['Duration Decimal'].sum().reset_index()
             all_unique_techs = completed_jobs['Assigned Team Members'].unique()
             
             utilization_records = []
             for tech in all_unique_techs:
-                j_hours = completed_jobs[completed_jobs['Assigned Team Members'] == tech]['Job Duration Decimal'].sum()
+                j_hours = completed_jobs[completed_jobs['Assigned Team Members'] == tech]['Custom Ticket Hours'].sum()
                 ts_match = ts_totals_audit[ts_totals_audit['User'] == tech]
                 ts_hours = ts_match['Duration Decimal'].values[0] if not ts_match.empty else 0.0
                 unallocated = max(0.0, ts_hours - j_hours)
@@ -216,17 +265,16 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
                 utilization_records.append({
                     'Tech Name': tech,
                     'Paid Clock Hours (Timesheets)': ts_hours,
-                    'On-Ticket Hours (Jobs)': j_hours,
+                    'On-Ticket Hours (Parsed)': j_hours,
                     'Unallocated Variance (Hours)': unallocated,
                     'Hourly Payroll Slippage': waste_cost if is_hourly else np.nan
                 })
                 
             utilization_df = pd.DataFrame(utilization_records).sort_values(by='Unallocated Variance (Hours)', ascending=False)
             
-            # Formatted using na_rep='-' to cleanly display non-hourly rows without crashing
             styler_utilization = utilization_df.style.format({
                 'Paid Clock Hours (Timesheets)': '{:.2f} hrs',
-                'On-Ticket Hours (Jobs)': '{:.2f} hrs',
+                'On-Ticket Hours (Parsed)': '{:.2f} hrs',
                 'Unallocated Variance (Hours)': '{:.2f} hrs',
                 'Hourly Payroll Slippage': '${:,.2f}'
             }, na_rep='-')
@@ -302,9 +350,7 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
             )
             contractor_df = completed_jobs[is_contractor_mask].copy()
             
-            # ---------------------------------------------------------
             # CONTRACTOR AGGREGATE PERFORMANCE SUMMARY
-            # ---------------------------------------------------------
             st.subheader("🏢 Contractor Aggregate Performance Summary")
             st.write("Summarizes total revenue, material overhead, payouts, and net business profit/loss aggregated by contractor entity. Sorted from most unlucrative to most profitable.")
             
@@ -337,9 +383,7 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
                 
             st.write("---")
             
-            # ---------------------------------------------------------
             # CONTRACTOR PROFIT/LOSS AUDIT (JOB-BY-JOB DETAIL)
-            # ---------------------------------------------------------
             st.subheader("🏗️ Contractor Profit & Loss Audit (Job-by-Job Detail)")
             
             if not contractor_df.empty:
