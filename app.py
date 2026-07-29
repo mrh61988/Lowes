@@ -93,7 +93,6 @@ def calculate_job_labor_cost(row):
     if pd.isna(duration): duration = 0.0
     if pd.isna(revenue): revenue = 0.0
     
-    # Base Job costings (remains proportional on single ticket evaluations)
     if tech == 'Sean Marble':
         return duration * (70000 / 2080)
     elif tech == 'Mathew Hodges':
@@ -203,7 +202,6 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
     valid_ts_dates = timesheets_df['Work Date'].dropna()
     if not valid_ts_dates.empty:
         days_span = (max(valid_ts_dates) - min(valid_ts_dates)).days + 1
-        # Normalize standard 5-day or 6-day standard field weeks up to a full 7-day salary block
         if days_span in [5, 6]:
             total_weeks = 1.0
         else:
@@ -257,8 +255,10 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
             
             st.write("---")
             
-            # AGGREGATE AUDITING LOG
+            # AGGREGATE AUDITING LOG (SORTED BY HIGHEST PAYROLL SLIPPAGE)
             st.subheader("⏰ Clock Hours vs. Ticket Hours Auditing Log (Aggregate Summary)")
+            st.write("Exposes team leaks by contrasting total clocked hours against active job tracking. **Sorted by highest financial payroll slippage**.")
+            
             ts_totals_audit = timesheets_df.groupby('User')['Duration Decimal'].sum().reset_index()
             all_unique_techs = completed_jobs['Assigned Team Members'].unique()
             
@@ -280,7 +280,9 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
                     'Hourly Payroll Slippage': waste_cost if is_hourly else np.nan
                 })
                 
-            utilization_df = pd.DataFrame(utilization_records).sort_values(by='Unallocated Variance (Hours)', ascending=False)
+            # Modified sorting logic: sorts from largest cash leak down to $0.00, pushing NaNs cleanly to bottom
+            utilization_df = pd.DataFrame(utilization_records).sort_values(by='Hourly Payroll Slippage', ascending=False, na_position='last')
+            
             st.dataframe(utilization_df.style.format({
                 'Paid Clock Hours (Timesheets)': '{:.2f} hrs', 'On-Ticket Hours (Parsed)': '{:.2f} hrs',
                 'Unallocated Variance (Hours)': '{:.2f} hrs', 'Hourly Payroll Slippage': '${:,.2f}'
@@ -325,8 +327,6 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
     # ---------------------------------------------------------
     with tab2:
         st.header("Financial Performance & Labor Cost Analysis")
-        
-        # Display Auto-Detected Scope Metric card/banner to build audit trails for upper management
         st.info(f"📅 **Dataset Scope Auto-Detected:** The uploaded logs span **{days_span} calendar days** ({total_weeks:.2f} weeks). Salaried overhead is computed using **{total_weeks:.2f} weeks of full salary burden** (Sean Marble: ${70000/52*total_weeks:,.2f}, Mathew Hodges: ${65000/52*total_weeks:,.2f}) to match this specific tracking window.")
         
         if not completed_jobs.empty:
@@ -341,21 +341,17 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
             ts_totals_finance = timesheets_df.groupby('User')['Duration Decimal'].sum().reset_index()
             hourly_techs_list = ['Matt Schlosser', 'Tanner LaForge', 'Edward Lopez']
             
-            # TRUE LABOUR ALIGNMENT ENGINE (DYNAMICAL TIME SPANS ACCEPTER)
             def determine_true_labor(row):
                 tech = row['Assigned Team Members']
-                # 1. Hourly Crew: Paid Clock Hours from Timesheets * $25
                 if tech in hourly_techs_list:
                     match = ts_totals_finance[ts_totals_finance['User'] == tech]
                     if not match.empty:
                         return match['Duration Decimal'].values[0] * 25.00
                     return 0.0
-                # 2. Salaried Crew: Scaled to cover full salary burden of the dataset timeframe
                 elif tech == 'Sean Marble':
                     return total_weeks * (70000 / 52)
                 elif tech == 'Mathew Hodges':
                     return total_weeks * (65000 / 52)
-                # 3. Commission/Contractors: Payout rules aggregated from ticket details
                 return row['Total_Labor_Cost_Jobs']
             
             fin_metrics['Labor Cost Burden'] = fin_metrics.apply(determine_true_labor, axis=1)
