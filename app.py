@@ -61,7 +61,7 @@ def load_regional_geojson_boundaries():
     """Streams minified geometric boundary vectors for localized Arizona postal code grids."""
     url = "https://raw.githubusercontent.com/OpenDataDE/State-zip-code-GeoJSON/master/az_arizona_zip_codes_geo.min.json"
     try:
-        req = urllib.request.Request(url, headers={'User-Agent': 'OpsCode_GeoEngine/12.0'})
+        req = urllib.request.Request(url, headers={'User-Agent': 'OpsCode_GeoEngine/13.0'})
         with urllib.request.urlopen(req, timeout=12) as response:
             return json.loads(response.read().decode())
     except Exception:
@@ -81,7 +81,7 @@ def geocode_address_string(address_str):
     encoded_query = urllib.parse.quote(query_string)
     url = f"https://nominatim.openstreetmap.org/search?q={encoded_query}&format=json&limit=1"
     try:
-        req = urllib.request.Request(url, headers={'User-Agent': 'OpsManagerDashboard_Geomap/12.0'})
+        req = urllib.request.Request(url, headers={'User-Agent': 'OpsManagerDashboard_Geomap/13.0'})
         with urllib.request.urlopen(req, timeout=4) as response:
             data = json.loads(response.read().decode())
             if data:
@@ -278,6 +278,7 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
     for col in raw_jobs_df.columns:
         if 'timestamp' in str(col).lower(): jobs_df_clean[col] = raw_jobs_df[col]
 
+    # STRICTOR GLOBAL STRATIFICATION FILTER (APPLIED IMMEDIATELY)
     jobs_df = jobs_df_clean[jobs_df_clean['Business Unit'].str.contains('Water Heater|Simple Install', case=False, na=False)].copy()
     jobs_df['Assigned Team Members'] = jobs_df['Assigned Team Members'].astype(str).str.split(',').str[0].str.strip().replace(['nan', 'None', ''], 'Unassigned')
 
@@ -304,7 +305,7 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
     tab1, tab2, tab3 = st.tabs(["Technician & Job Metrics", "Financial & Labor ROI", "Geographic Performance"])
 
     # ---------------------------------------------------------
-    # TAB 1: RESTORED & CLEANLY FORMATTED PRODUCTIVITY SUITE
+    # TAB 1: TECH LEADERBOARD & TIMESHEET VARIANCE AUDIT
     # ---------------------------------------------------------
     with tab1:
         st.header("Technician Productivity & Job Performance")
@@ -318,12 +319,10 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
                 Avg_Revenue_Per_Job=('Total Invoice Amount', 'mean')
             ).reset_index().sort_values('Total_Jobs_Completed', ascending=False)
             
-            # Formatting floats cleanly before render layers to mirror high-end report cards
             tech_metrics['Total_Revenue_Generated'] = tech_metrics['Total_Revenue_Generated'].astype(float)
             tech_metrics['Avg_Revenue_Per_Job'] = tech_metrics['Avg_Revenue_Per_Job'].astype(float)
             tech_metrics['Avg_Duration_Hours'] = tech_metrics['Avg_Duration_Hours'].map(format_hours_mins)
 
-            # Human-readable label remapping
             tech_metrics_renamed = tech_metrics.rename(columns={
                 'Assigned Team Members': 'Assigned Team Members',
                 'Total_Jobs_Completed': 'Total Jobs Completed',
@@ -342,14 +341,14 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
             )
 
             st.markdown("---")
-            st.subheader("⏱️ Restored Labor Hours & Timesheet Variance Audit")
-            st.write("Cross-references field ticket records directly against clocked system timesheet inputs to highlight operational discrepancies.")
+            st.subheader("⏱️ Labor Hours & Timesheet Variance Audit")
+            st.write("Cross-references field ticket records against clocked timesheets. Filters out data leaks from other departments.")
 
-            # Compute actual clocked logs vs parsed inside-ticket durations
             ts_summary = timesheets_df.groupby('User')['Duration Decimal'].sum().reset_index()
             ticket_summary = completed_jobs.groupby('Assigned Team Members')['Custom Ticket Hours'].sum().reset_index()
 
-            audit_df = pd.merge(ticket_summary, ts_summary, left_on='Assigned Team Members', right_on='User', how='outer').fillna(0.0)
+            # SAFE GUARDRAIL: Shifting from outer join to a left join anchored strictly to relevant business streams
+            audit_df = pd.merge(ticket_summary, ts_summary, left_on='Assigned Team Members', right_on='User', how='left').fillna(0.0)
             audit_df['User'] = np.where(audit_df['User'] == 0.0, audit_df['Assigned Team Members'], audit_df['User'])
             audit_df = audit_df[audit_df['User'] != 'Unassigned']
 
@@ -360,7 +359,6 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
                 0.0
             )
 
-            # Convert to duration format strings
             audit_df['Active Ticket Hours'] = audit_df['Custom Ticket Hours'].map(format_hours_mins)
             audit_df['Clocked Timesheet Hours'] = audit_df['Duration Decimal'].map(format_hours_mins)
             audit_df['Variance/Travel Hours'] = audit_df['Variance Hours'].map(format_hours_mins)
@@ -375,7 +373,7 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
             )
 
     # ---------------------------------------------------------
-    # TAB 2: RESTORED & CLEANLY FORMATTED COST ROBUSTNESS SUITE
+    # TAB 2: ROI LEDGER & OPERATING MARGIN DEEP DIVE
     # ---------------------------------------------------------
     with tab2:
         st.header("Financial Performance & Labor Cost Analysis")
@@ -388,7 +386,6 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
                 Net_Profit=('Net Gross Profit', 'sum')
             ).reset_index().sort_values('Net_Profit', ascending=False)
             
-            # Re-securing absolute data primitives for style targets
             for c in ['Total_Revenue', 'Total_Material_Cost', 'Total_Labor_Cost_Jobs', 'Net_Profit']:
                 fin_metrics[c] = fin_metrics[c].astype(float)
 
@@ -413,8 +410,8 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
             )
 
             st.markdown("---")
-            st.subheader("📊 Restored Margin Breakdown & Yield Analysis")
-            st.write("Identifies high-performing resource classifications by examining the true gross margins of the business units.")
+            st.subheader("📊 Profit Margin Breakdown & Yield Analysis")
+            st.write("Identifies high-performing technician tiers by highlighting the exact operating margins achieved in the field.")
 
             fin_metrics['Gross Margin %'] = np.where(
                 fin_metrics['Total_Revenue'] > 0,
@@ -436,12 +433,13 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
             )
 
     # ---------------------------------------------------------
-    # TAB 3: GEOGRAPHIC PERFORMANCE (STABILIZED SPATIAL DISTRIBUTION)
+    # TAB 3: GEOGRAPHIC PERFORMANCE (STABILIZED VISUAL LAYER)
     # ---------------------------------------------------------
     with tab3:
         st.header("Geographic Profitability & Travel Time Analysis")
         
-        geo_df = pd.merge(jobs_df, invoices_df, left_on='Related Invoices', right_on='#ID', how='left', suffixes=('', '_invoice')) if 'Related Invoices' in jobs_df.columns else geo_df.copy()
+        # Merge is naturally restricted because geo_df originates strictly from filtered jobs_df
+        geo_df = pd.merge(jobs_df, invoices_df, left_on='Related Invoices', right_on='#ID', how='left', suffixes=('', '_invoice')) if 'Related Invoices' in jobs_df.columns else jobs_df.copy()
 
         if 'Zip Code' in geo_df.columns:
             geo_df['Zip Code'] = geo_df['Zip Code'].astype(str).str.strip().str.replace(r'\.0$', '', regex=True).str.zfill(5)
