@@ -292,7 +292,7 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
     jobs_df_clean['Related Invoices'] = raw_jobs_df[mapped_rel_inv].fillna('').astype(str) if mapped_rel_inv else ''
     jobs_df_clean['#ID'] = raw_jobs_df[mapped_id].fillna('').astype(str) if mapped_id else raw_jobs_df.index.astype(str)
 
-    # Re-apply tracking columns dynamically for custom timestamp lookups (Fix applied: columns are now deduplicated strings)
+    # Re-apply tracking columns dynamically for custom timestamp lookups
     for col in raw_jobs_df.columns:
         if 'timestamp' in str(col).lower():
             jobs_df_clean[col] = raw_jobs_df[col]
@@ -595,34 +595,44 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
             st.warning("No completed financial data available to build margins.")
 
     # ---------------------------------------------------------
-    # TAB 3: Geographic Performance
+    # TAB 3: Geographic Performance (FIXED & AUDITED)
     # ---------------------------------------------------------
     with tab3:
         st.header("Geographic Profitability & Travel Time Analysis")
+        
+        # Fixed: Shifted to a safe Left Join with structural clean suffixes to prevent column name string drops
         if 'Related Invoices' in jobs_df.columns and '#ID' in invoices_df.columns:
             jobs_df['Related Invoices'] = jobs_df['Related Invoices'].astype(str).str.split('.').str[0].str.strip()
             invoices_df['#ID'] = invoices_df['#ID'].astype(str).str.split('.').str[0].str.strip()
-            geo_df = pd.merge(jobs_df, invoices_df, left_on='Related Invoices', right_on='#ID', how='inner')
+            geo_df = pd.merge(jobs_df, invoices_df, left_on='Related Invoices', right_on='#ID', how='left', suffixes=('', '_invoice'))
         else:
             geo_df = jobs_df.copy()
 
         if 'Assigned Team Members' in geo_df.columns:
             geo_df = geo_df.dropna(subset=['Assigned Team Members'])
 
+        # Sanitize and scrub messy string or decimal formatting artifacts out of Zip Code column values
         if 'Zip Code' in geo_df.columns:
-            geo_df['Zip Code'] = geo_df['Zip Code'].astype(str).str.strip()
-            geo_df = geo_df[(geo_df['Zip Code'] != 'nan') & (geo_df['Zip Code'] != '')]
+            geo_df['Zip Code'] = geo_df['Zip Code'].astype(str).str.strip().str.replace(r'\.0$', '', regex=True)
+            geo_df = geo_df[(geo_df['Zip Code'] != 'nan') & (geo_df['Zip Code'] != '') & (geo_df['Zip Code'] != 'None')]
             
+        # Ensure data table layout executes conditionally only when geographical vectors are actually parsed
+        if 'Zip Code' in geo_df.columns and not geo_df.empty:
             col3, col4 = st.columns(2)
             with col3:
                 st.subheader("💰 Most Lucrative Zip Codes (Net Profit)")
-                if 'Profit Margin' in geo_df.columns:
-                    profit_by_zip = geo_df.groupby('Zip Code').agg(
-                        Job_Count=('Zip Code', 'count'), Total_Net_Profit=('Profit Margin', 'sum'), Avg_Profit_Per_Job=('Profit Margin', 'mean')
-                    ).reset_index().sort_values('Total_Net_Profit', ascending=False)
-                    
-                    profit_by_zip.columns = ['Zip Code', 'Total Jobs', 'Total Net Profit', 'Avg Profit/Job']
-                    st.dataframe(profit_by_zip.style.format({'Total Net Profit': '${:,.2f}', 'Avg Profit/Job': '${:,.2f}'}), use_container_width=True, hide_index=True)
+                
+                # Dynamic Fallback Protection: Use calculated labor profit if invoice-level profit margin column is empty
+                profit_col = 'Profit Margin' if ('Profit Margin' in geo_df.columns and geo_df['Profit Margin'].sum() != 0) else 'Net Gross Profit'
+                
+                profit_by_zip = geo_df.groupby('Zip Code').agg(
+                    Job_Count=('Zip Code', 'count'), 
+                    Total_Net_Profit=(profit_col, 'sum'), 
+                    Avg_Profit_Per_Job=(profit_col, 'mean')
+                ).reset_index().sort_values('Total_Net_Profit', ascending=False)
+                
+                profit_by_zip.columns = ['Zip Code', 'Total Jobs', 'Total Net Profit', 'Avg Profit/Job']
+                st.dataframe(profit_by_zip.style.format({'Total Net Profit': '${:,.2f}', 'Avg Profit/Job': '${:,.2f}'}), use_container_width=True, hide_index=True)
             
             with col4:
                 st.subheader("🚗 Travel Efficiency by Zone")
@@ -633,5 +643,9 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
                     
                     travel_waste.columns = ['Zip Code', 'Total Jobs', 'Avg Drive Time (H:MM)', 'Avg Ticket Size']
                     st.dataframe(travel_waste.style.format({'Avg Drive Time (H:MM)': format_hours_mins, 'Avg Ticket Size': '${:,.2f}'}), use_container_width=True, hide_index=True)
+                else:
+                    st.info("Travel tracking duration columns are missing or empty in this dataset upload window.")
+        else:
+            st.info("ℹ️ No active geographical location records or valid Zip Codes detected within this file range to map performance details.")
 else:
     st.info("👋 Welcome! Please upload **all three** operational CSV exports in the sidebar to build your data tables.")
