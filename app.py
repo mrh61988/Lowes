@@ -1,17 +1,17 @@
 import streamlit as st
 import pandas as pd
-import plotly.express as px
 
 # Set page configuration
 st.set_page_config(page_title="Ops Manager Dashboard", layout="wide")
 
-st.title("Water Heater & Install Operations Dashboard")
+st.title("Water Heater & Simple Installs Operations Dashboard")
+st.write("Data filtered exclusively for **Water Heaters** and **Simple Installs** business units.")
 
 # ---------------------------------------------------------
 # 1. SIDEBAR FILE UPLOADS
 # ---------------------------------------------------------
 st.sidebar.header("📁 Upload Operational Data")
-st.sidebar.write("Upload your CSV exports below to populate the dashboard dynamically.")
+st.sidebar.write("Upload your CSV exports below to populate the data tables.")
 
 uploaded_jobs = st.sidebar.file_uploader("Upload 'jobs full data.csv'", type=["csv"])
 uploaded_invoices = st.sidebar.file_uploader("Upload 'invoices.csv'", type=["csv"])
@@ -28,14 +28,24 @@ def process_uploaded_file(file):
     return None
 
 # Process data if files are provided
-jobs_df = process_uploaded_file(uploaded_jobs)
+raw_jobs_df = process_uploaded_file(uploaded_jobs)
 invoices_df = process_uploaded_file(uploaded_invoices)
 
 # ---------------------------------------------------------
 # 2. DASHBOARD LOGIC (Runs only when data is uploaded)
 # ---------------------------------------------------------
-if jobs_df is not None and invoices_df is not None:
+if raw_jobs_df is not None and invoices_df is not None:
     
+    # --- STAGE 1: FILTER BY BUSINESS UNIT ---
+    if 'Business Unit' in raw_jobs_df.columns:
+        # Filter for only Water Heaters and Simple Installs rows
+        jobs_df = raw_jobs_df[
+            raw_jobs_df['Business Unit'].str.contains('Water Heaters|Simple Installs', case=False, na=False)
+        ].copy()
+    else:
+        jobs_df = raw_jobs_df.copy()
+        st.sidebar.warning("Warning: 'Business Unit' column not found. Showing all jobs.")
+
     # --- Clean numeric & date columns for Jobs ---
     numeric_cols_jobs = ['Total Invoice Amount', 'Job Duration Decimal', 'Travel Duration Decimal']
     for col in numeric_cols_jobs:
@@ -50,67 +60,72 @@ if jobs_df is not None and invoices_df is not None:
         invoices_df['Profit Margin'] = pd.to_numeric(invoices_df['Profit Margin'], errors='coerce')
 
     # Create tabs for the different modules
-    tab1, tab2 = st.tabs(["Technician & Job Performance", "Geographic & Territory Performance"])
+    tab1, tab2 = st.tabs(["Technician & Job Metrics", "Geographic & Territory Performance"])
 
     # ---------------------------------------------------------
-    # TAB 1: Technician & Job Performance (Replacing Blank Feedback)
+    # TAB 1: Technician & Job Metrics (Tables Only)
     # ---------------------------------------------------------
     with tab1:
-        st.header("Technician Productivity & Efficiency")
+        st.header("Technician Productivity & Job Performance")
         
-        # Filter out jobs without assigned team members or duration
-        valid_jobs = jobs_df.dropna(subset=['Assigned Team Members', 'Job Duration Decimal']).copy()
+        # Only analyze completed work types
+        completed_jobs = jobs_df[jobs_df['Status'] == 'Completed'].copy()
         
-        col1, col2 = st.columns(2)
-        
-        # A. Total Jobs Completed by Tech
-        with col1:
-            st.subheader("Volume: Jobs Completed by Technician")
-            # Only count actual completed/invoiced work types
-            completed_jobs = valid_jobs[valid_jobs['Status'] == 'Completed']
-            tech_volume = completed_jobs['Assigned Team Members'].value_counts().reset_index()
-            tech_volume.columns = ['Technician', 'Jobs Completed']
+        if not completed_jobs.empty:
+            col1, col2 = st.columns(2)
             
-            fig_vol = px.bar(tech_volume, x='Technician', y='Jobs Completed',
-                             color='Jobs Completed', color_continuous_scale='Blues',
-                             title="Total Completed Jobs per Technician")
-            st.plotly_chart(fig_vol, use_container_width=True)
-            
-        # B. Average Job Speed by Tech
-        with col2:
-            st.subheader("Efficiency: Avg Job Duration (Hours)")
-            tech_speed = completed_jobs.groupby('Assigned Team Members')['Job Duration Decimal'].mean().reset_index().sort_values('Job Duration Decimal')
-            tech_speed.columns = ['Technician', 'Avg Duration (Hours)']
-            
-            fig_speed = px.bar(tech_speed, x='Technician', y='Avg Duration (Hours)',
-                               color='Avg Duration (Hours)', color_continuous_scale='Turbo',
-                               title="Average Hours Spent per Job (Lower = Faster Swap Outs)")
-            st.plotly_chart(fig_speed, use_container_width=True)
-            
-        # C. Install Type Breakdown
-        st.write("---")
-        st.subheader("Job Type Mix & Revenue Generation")
-        
-        job_mix = completed_jobs.groupby('Title').agg(
-            Job_Count=('Title', 'count'),
-            Avg_Revenue=('Total Invoice Amount', 'mean')
-        ).reset_index().sort_values('Job_Count', ascending=False).head(15)
-        
-        fig_mix = px.bar(job_mix, x='Title', y='Job_Count',
-                         color='Avg_Revenue', color_continuous_scale='Viridis',
-                         labels={'Job_Count': 'Number of Installs', 'Avg_Revenue': 'Avg Revenue ($)'},
-                         title="Top 15 Job Types by Volume (Color Shows Avg Revenue per Job)",
-                         text_auto=True)
-        fig_mix.update_layout(xaxis_tickangle=-45)
-        st.plotly_chart(fig_mix, use_container_width=True)
+            with col1:
+                st.subheader("📋 Completed Jobs & Speed by Technician")
+                # Group metrics per technician
+                tech_metrics = completed_jobs.groupby('Assigned Team Members').agg(
+                    Total_Jobs_Completed=('Status', 'count'),
+                    Avg_Duration_Hours=('Job Duration Decimal', 'mean'),
+                    Total_Revenue_Generated=('Total Invoice Amount', 'sum'),
+                    Avg_Revenue_Per_Job=('Total Invoice Amount', 'mean')
+                ).reset_index().sort_values('Total_Jobs_Completed', ascending=False)
+                
+                # Format for clean viewing
+                tech_metrics.columns = ['Technician Name', 'Jobs Completed', 'Avg Job Hours', 'Total Revenue', 'Avg Revenue/Job']
+                st.dataframe(
+                    tech_metrics.style.format({
+                        'Avg Job Hours': '{:.2f}', 
+                        'Total Revenue': '${:,.2f}', 
+                        'Avg Revenue/Job': '${:,.2f}'
+                    }), 
+                    use_container_width=True,
+                    hide_index=True
+                )
+                
+            with col2:
+                st.subheader("🔧 Performance Breakdown by Job Type")
+                # Group metrics per specific job title
+                job_mix = completed_jobs.groupby('Title').agg(
+                    Job_Count=('Title', 'count'),
+                    Avg_Duration_Hours=('Job Duration Decimal', 'mean'),
+                    Avg_Revenue_Per_Job=('Total Invoice Amount', 'mean'),
+                    Total_Revenue=('Total Invoice Amount', 'sum')
+                ).reset_index().sort_values('Job_Count', ascending=False)
+                
+                job_mix.columns = ['Job Title / Type', 'Volume Done', 'Avg Hours Spent', 'Avg Ticket Size', 'Total Revenue']
+                st.dataframe(
+                    job_mix.style.format({
+                        'Avg Hours Spent': '{:.2f}', 
+                        'Avg Ticket Size': '${:,.2f}', 
+                        'Total Revenue': '${:,.2f}'
+                    }),
+                    use_container_width=True,
+                    hide_index=True
+                )
+        else:
+            st.warning("No 'Completed' status jobs found for Water Heaters or Simple Installs.")
 
     # ---------------------------------------------------------
-    # TAB 2: Geographic & Territory Performance
+    # TAB 2: Geographic & Territory Performance (Tables Only)
     # ---------------------------------------------------------
     with tab2:
-        st.header("Geographic & Territory Performance")
+        st.header("Geographic Profitability & Travel Time Analysis")
         
-        # Merge Jobs and Invoices to tie Profit Margin to Zip Codes
+        # Merge the filtered Jobs and Invoices to tie financial details to Zip Codes
         if 'Related Invoices' in jobs_df.columns and '#ID' in invoices_df.columns:
             geo_df = pd.merge(jobs_df, invoices_df, left_on='Related Invoices', right_on='#ID', how='inner')
         else:
@@ -118,51 +133,54 @@ if jobs_df is not None and invoices_df is not None:
 
         if 'Zip Code' in geo_df.columns:
             geo_df['Zip Code'] = geo_df['Zip Code'].astype(str).str.strip()
-            geo_df = geo_df[geo_df['Zip Code'] != 'nan']
+            geo_df = geo_df[(geo_df['Zip Code'] != 'nan') & (geo_df['Zip Code'] != '')]
             
             col3, col4 = st.columns(2)
             
-            # A. Profit Heatmaps (by Zip Code)
             with col3:
-                st.subheader("Most Lucrative Zip Codes")
+                st.subheader("💰 Most Lucrative Zip Codes (Net Profit)")
                 if 'Profit Margin' in geo_df.columns:
-                    profit_by_zip = geo_df.groupby('Zip Code')['Profit Margin'].sum().reset_index().sort_values('Profit Margin', ascending=False).head(15)
+                    profit_by_zip = geo_df.groupby('Zip Code').agg(
+                        Job_Count=('Zip Code', 'count'),
+                        Total_Net_Profit=('Profit Margin', 'sum'),
+                        Avg_Profit_Per_Job=('Profit Margin', 'mean')
+                    ).reset_index().sort_values('Total_Net_Profit', ascending=False)
                     
-                    fig_profit = px.bar(profit_by_zip, x='Zip Code', y='Profit Margin',
-                                        color='Profit Margin', color_continuous_scale='Greens',
-                                        title="Total Net Profit Margin by Zip Code")
-                    fig_profit.update_xaxes(type='category')
-                    st.plotly_chart(fig_profit, use_container_width=True)
+                    profit_by_zip.columns = ['Zip Code', 'Total Jobs', 'Total Net Profit', 'Avg Profit/Job']
+                    st.dataframe(
+                        profit_by_zip.style.format({
+                            'Total Net Profit': '${:,.2f}', 
+                            'Avg Profit/Job': '${:,.2f}'
+                        }), 
+                        use_container_width=True,
+                        hide_index=True
+                    )
                 else:
-                    st.info("Profit Margin column missing or not successfully merged.")
+                    st.info("Profit Margin data missing or unable to match invoice records.")
 
-            # B. Travel Waste by Zone
             with col4:
-                st.subheader("Travel Waste Analysis")
+                st.subheader("🚗 Travel Efficiency & Revenue Leakage by Zone")
                 if 'Travel Duration Decimal' in geo_df.columns and 'Total Invoice Amount' in geo_df.columns:
                     travel_waste = geo_df.groupby('Zip Code').agg(
-                        Avg_Travel=('Travel Duration Decimal', 'mean'),
-                        Avg_Invoice=('Total Invoice Amount', 'mean'),
-                        Job_Count=('Total Invoice Amount', 'count')
-                    ).reset_index()
+                        Job_Count=('Zip Code', 'count'),
+                        Avg_Travel_Hours=('Travel Duration Decimal', 'mean'),
+                        Avg_Invoice_Amount=('Total Invoice Amount', 'mean')
+                    ).reset_index().sort_values('Avg_Travel_Hours', ascending=False)
                     
-                    travel_waste = travel_waste[travel_waste['Job_Count'] >= 2]
-                    
-                    fig_waste = px.scatter(travel_waste, x='Avg_Travel', y='Avg_Invoice', 
-                                           size='Job_Count', color='Zip Code', hover_name='Zip Code',
-                                           title="Avg Travel Time vs Avg Invoice Amount by Zip",
-                                           labels={'Avg_Travel': 'Avg Travel Time (Hours)', 'Avg_Invoice': 'Avg Invoice Amount ($)'})
-                    
-                    fig_waste.add_hline(y=travel_waste['Avg_Invoice'].median(), line_dash="dot", line_color="red", annotation_text="Median Invoice")
-                    fig_waste.add_vline(x=travel_waste['Avg_Travel'].median(), line_dash="dot", line_color="red", annotation_text="Median Travel")
-                    
-                    st.plotly_chart(fig_waste, use_container_width=True)
+                    travel_waste.columns = ['Zip Code', 'Total Jobs', 'Avg Drive Time (Hours)', 'Avg Ticket Size']
+                    st.dataframe(
+                        travel_waste.style.format({
+                            'Avg Drive Time (Hours)': '{:.2f}', 
+                            'Avg Ticket Size': '${:,.2f}'
+                        }), 
+                        use_container_width=True,
+                        hide_index=True
+                    )
                 else:
-                    st.info("Travel duration or Invoice Amount columns missing.")
+                    st.info("Travel duration or Invoice Amount metrics are missing in the data.")
         else:
-            st.warning("No Zip Code data available in the uploaded files.")
+            st.warning("No Zip Code field populated in the uploaded source files.")
 
 else:
-    # Landing page message when no files are uploaded yet
-    st.info("👋 Welcome! Please upload **both** CSV files in the sidebar to populate the dashboard analytics.")
-    st.image("https://images.unsplash.com/photo-1551288049-bebda4e38f71?auto=format&fit=crop&w=600&q=80", width=500)
+    # Landing page state when files aren't uploaded yet
+    st.info("👋 Welcome! Please upload **both** operational CSV exports in the sidebar to build your data tables.")
