@@ -366,7 +366,7 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
             st.dataframe(fin_metrics.style.format({'Total_Revenue': '${:,.2f}', 'Total_Material_Cost': '${:,.2f}', 'Labor Cost Burden': '${:,.2f}', 'Net Gross Profit': '${:,.2f}'}), use_container_width=True, hide_index=True)
 
     # ---------------------------------------------------------
-    # TAB 3: GEOGRAPHIC PERFORMANCE (TRUE REGIONAL LAYER)
+    # TAB 3: GEOGRAPHIC PERFORMANCE (STREET-LEVEL CONTEXT CHOROPLETH)
     # ---------------------------------------------------------
     with tab3:
         st.header("Geographic Profitability & Travel Time Analysis")
@@ -380,27 +380,25 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
 
         if not geo_df.empty:
             st.subheader("🗺️ Regional Density Choropleth Map")
-            st.write("Zip code parameters filled with continuous hue weights. **Darker maroon boundaries pinpoint core volume hubs**.")
+            st.write("Zip code parameters filled with translucent color ramps. **City centers, arterial highways, and local street labels pierce through directly from the base map layer**.")
             
-            # Aggregate volume maps per zone
             zip_geo_counts = geo_df.groupby('Zip Code').size().reset_index(name='Job_Count')
             max_jobs = max(1, zip_geo_counts['Job_Count'].max())
             zip_counts_dict = zip_geo_counts.set_index('Zip Code')['Job_Count'].to_dict()
             
-            # Load the regional GeoJSON boundary vectors
             geojson_data = load_regional_geojson_boundaries()
             
             if geojson_data:
                 features_to_render = []
                 avg_lats, avg_lons = [], []
                 
-                # Dynamic solid color variance ramp formula (Light Pinkish Red -> Dark Burgundy)
+                # Calibrated alpha scale (100 out of 255) ensures base map strings, icons, and highways are legible
                 def get_red_palette_ramp(count, max_val):
                     ratio = min(1.0, count / max_val)
-                    r = int(255 - (ratio * (255 - 139)))
-                    g = int(180 - (ratio * 180))
-                    b = int(180 - (ratio * 180))
-                    return [r, g, b, 200]
+                    r = int(245 - (ratio * (245 - 128)))
+                    g = int(140 - (ratio * 140))
+                    b = int(140 - (ratio * 140))
+                    return [r, g, b, 100]
 
                 for feature in geojson_data.get('features', []):
                     props = feature.get('properties', {})
@@ -414,7 +412,6 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
                         count = zip_counts_dict[z_code]
                         color = get_red_palette_ramp(count, max_jobs)
                         
-                        # Inject payload details directly into rendering feature vectors
                         feature['zip_label'] = z_code
                         feature['job_volume'] = int(count)
                         feature['properties']['fill_color'] = color
@@ -429,17 +426,17 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
                 if features_to_render:
                     filtered_geojson = {"type": "FeatureCollection", "features": features_to_render}
                     
-                    # Construct Pydeck multi-polygon layer configuration
+                    # Upgraded GeoJsonLayer with low layer opacity to preserve underneath landmark visibility
                     choropleth_layer = pdk.Layer(
                         "GeoJsonLayer",
                         filtered_geojson,
-                        opacity=0.75,
+                        opacity=0.65,
                         stroked=True,
                         filled=True,
                         wireframe=True,
                         get_fill_color="properties.fill_color",
-                        get_line_color=[140, 20, 20, 255],
-                        get_line_width=2.5,
+                        get_line_color=[120, 10, 10, 180],
+                        get_line_width=2.0,
                         line_width_min_pixels=1,
                         pickable=True
                     )
@@ -453,13 +450,14 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
                             latitude=center_lat, longitude=center_lon,
                             zoom=9.3, pitch=0
                         ),
-                        map_style="mapbox://styles/mapbox/light-v9",
+                        # Set to CARTO_ROAD (Voyager) vector style providing rich context, streets, and labels
+                        map_style=pdk.map_styles.CARTO_ROAD,
                         tooltip={"text": "Zip Code Zone: {zip_label}\nOperational Volume: {job_volume} jobs"}
                     ))
                 else:
                     st.warning("Uploaded Zip Codes do not intersect with the boundary file coordinates registry.")
             else:
-                st.error("Boundary shapefile could not be loaded. Confirm network connection to GitHub resource grids.")
+                st.error("Boundary shapefile could not be loaded. Confirm network connection.")
                 
             st.markdown("---")
             
@@ -482,5 +480,7 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
                     ).reset_index().sort_values('Avg_Travel_Hours', ascending=False)
                     travel_waste.columns = ['Zip Code', 'Total Jobs', 'Avg Drive Time (H:MM)', 'Avg Ticket Size']
                     st.dataframe(travel_waste.style.format({'Avg Drive Time (H:MM)': format_hours_mins, 'Avg Ticket Size': '${:,.2f}'}), use_container_width=True, hide_index=True)
+                else:
+                    st.info("Travel tracking duration columns are missing or empty in this dataset upload window.")
 else:
     st.info("👋 Welcome! Please upload all operational CSV exports in the sidebar to compile metric tables.")
