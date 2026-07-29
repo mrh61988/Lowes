@@ -1,5 +1,6 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
 
 # Set page configuration
 st.set_page_config(page_title="Ops Manager Dashboard", layout="wide")
@@ -137,7 +138,6 @@ if raw_jobs_df is not None and invoices_df is not None:
     if 'Business Unit' in jobs_df.columns:
         is_water_heater = jobs_df['Business Unit'].str.contains('Water Heaters', case=False, na=False)
         jobs_df.loc[is_water_heater, 'Material Cost'] = jobs_df.loc[is_water_heater, 'Material Cost'] - 125.00
-        # Prevent material costs from dipping below $0.00 due to the deduction
         jobs_df['Material Cost'] = jobs_df['Material Cost'].clip(lower=0.0)
 
     # Recalculate true net gross profit based on adjusted materials
@@ -186,11 +186,11 @@ if raw_jobs_df is not None and invoices_df is not None:
             st.warning("No 'Completed' status jobs found.")
 
     # ---------------------------------------------------------
-    # TAB 2: Financial & Labor ROI Metrics
+    # TAB 2: Financial & Labor ROI Metrics (Updated Metric)
     # ---------------------------------------------------------
     with tab2:
         st.header("Financial Performance & Labor Cost Analysis")
-        st.write("This table tracks internal payroll burden and contractor invoice payouts against job material costs (adjusted for built-in estimates).")
+        st.write("This table tracks internal payroll burden and contractor invoice payouts compared against net operational profit.")
         
         if not completed_jobs.empty:
             # Group financial metrics
@@ -202,10 +202,12 @@ if raw_jobs_df is not None and invoices_df is not None:
                 Total_Net_Profit=('Net Gross Profit', 'sum')
             ).reset_index().sort_values('Total_Net_Profit', ascending=False)
             
-            fin_metrics['Labor % of Rev'] = (fin_metrics['Total_Labor_Cost'] / fin_metrics['Total_Revenue']) * 100
-            fin_metrics['Labor % of Rev'] = fin_metrics['Labor % of Rev'].fillna(0.0)
+            # Metric Change: Calculate Labor Cost relative to Net Profit instead of Revenue
+            fin_metrics['Labor % of Profit'] = (fin_metrics['Total_Labor_Cost'] / fin_metrics['Total_Net_Profit']) * 100
+            # Safety: Replace infinite loops or NaN states from division by zero
+            fin_metrics['Labor % of Profit'] = fin_metrics['Labor % of Profit'].replace([np.inf, -np.inf], np.nan).fillna(0.0)
             
-            fin_metrics.columns = ['Name', 'Jobs Done', 'Gross Revenue', 'Material Costs', 'Labor Cost Burden', 'Net Gross Profit', 'Labor % of Revenue']
+            fin_metrics.columns = ['Name', 'Jobs Done', 'Gross Revenue', 'Material Costs', 'Labor Cost Burden', 'Net Gross Profit', 'Labor % of Profit']
             
             st.dataframe(
                 fin_metrics.style.format({
@@ -213,11 +215,13 @@ if raw_jobs_df is not None and invoices_df is not None:
                     'Material Costs': '${:,.2f}',
                     'Labor Cost Burden': '${:,.2f}',
                     'Net Gross Profit': '${:,.2f}',
-                    'Labor % of Revenue': '{:.1f}%'
+                    'Labor % of Profit': '{:.1f}%'
                 }),
                 use_container_width=True,
                 hide_index=True
             )
+            
+            st.info("💡 **Ops Management Insight:** *Labor % of Profit* measures efficiency by highlighting what portion of your take-home gross profits are absorbed by technician payroll or contractor payouts. Lower percentages represent higher organizational margin retention.")
         else:
             st.warning("No completed financial data available to build margins.")
 
