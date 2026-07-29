@@ -390,7 +390,7 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
             }), use_container_width=True, hide_index=True)
             
             # ---------------------------------------------------------
-            # NEW ADDITION: EXEMPTION STREAM SEGMENTER & CONTRACT VARIANCE AUDITS
+            # EXEMPTION STREAM SEGMENTER & CONTRACT VARIANCE AUDITS
             # ---------------------------------------------------------
             st.write("---")
             st.subheader("🛠️ Lowe's Contract Protections & Revenue Audits")
@@ -415,7 +415,8 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
                         Labor_Costs=('Labor Cost', 'sum')
                     ).reset_index()
                     
-                    wh_stream_summary['Net Profit'] = wh_stream_summary['Gross Revenue'] - wh_stream_summary['Material_Costs'] - wh_stream_summary['Labor_Costs']
+                    # FIXED: Mismatch between 'Gross_Revenue' and 'Gross Revenue' key call
+                    wh_stream_summary['Net Profit'] = wh_stream_summary['Gross_Revenue'] - wh_stream_summary['Material_Costs'] - wh_stream_summary['Labor_Costs']
                     wh_stream_summary['Avg Profit / Job'] = wh_stream_summary['Net Profit'] / wh_stream_summary['Total_Jobs']
                     
                     wh_stream_summary.columns = ['Revenue Stream', 'Jobs Done', 'Gross Revenue', 'Material Overhead', 'Labor Overhead', 'Net Profit', 'Avg Margin / Job']
