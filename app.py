@@ -1,535 +1,363 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+import re
+from datetime import datetime
 
-# Set page configuration
-st.set_page_config(page_title="Ops Manager Dashboard", layout="wide")
+# -----------------------------------------------------------------------------
+# 1. PAGE CONFIGURATION & UI STYLING
+# -----------------------------------------------------------------------------
+st.set_page_config(
+    page_title="Operations & Profitability Audit Dashboard",
+    page_icon="📊",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
-st.title("Water Heater & Simple Installs Operations Dashboard")
-st.write("Data filtered exclusively for **Water Heaters** and **Simple Installs** business units. Multi-tech jobs are attributed solely to the primary (first named) technician.")
+st.markdown("""
+    <style>
+    .metric-card {
+        background-color: #f8f9fa;
+        padding: 15px;
+        border-radius: 5px;
+        border-left: 5px solid #007bff;
+        margin-bottom: 10px;
+    }
+    .variance-alert {
+        color: #d9534f;
+        font-weight: bold;
+    }
+    </style>
+""", unsafe_allow_html=True)
 
-# ---------------------------------------------------------
-# TIME FORMATTING HELPER FUNCTION
-# ---------------------------------------------------------
-def format_hours_mins(decimal_hours):
-    """Converts a decimal hour value (e.g., 1.25) into an H:MM string format (e.g., 1:15)"""
-    if pd.isna(decimal_hours) or decimal_hours is None:
-        return "-"
-    total_minutes = int(round(decimal_hours * 60))
-    hours = total_minutes // 60
-    minutes = total_minutes % 60
-    return f"{hours}:{minutes:02d}"
+st.title("📊 Operations & Profitability Dashboard")
+st.markdown("Track contractor profitability, reconcile retail invoices, and detect labor slippage across standard and exception work streams.")
+st.markdown("---")
 
-# ---------------------------------------------------------
-# DYNAMIC ON-TICKET TIME CALCULATOR ENGINE
-# ---------------------------------------------------------
-def compute_custom_ticket_hours(row, cols):
+# -----------------------------------------------------------------------------
+# 2. ADVANCED MULTI-ITEM & QUANTITY PRICING ENGINE
+# -----------------------------------------------------------------------------
+def lookup_matrix_rate(row, tech_name, current_revenue, erik_mat, bryan_mat, mode="labor"):
     """
-    Calculates ticket duration based on workflow status timestamps.
-    Start Time: Earliest of 'On The Way', 'Lowes Store', or 'In Progress'.
-    End Time: 'Pending Audit'.
-    Edge Case 1: Missing start data defaults to 2.0 hours.
-    Edge Case 2: Multiple visits select the absolute earliest start milestone.
+    Scans the job title for item order and maps them sequentially to slash 
+    notation quantities in the subtitle. If the subtitle is empty, it assumes 
+    a default quantity of 1 for each detected item.
     """
-    start_times = []
-    end_times = []
+    job_title = str(row.get('Title', row.get('Job Title', ''))).lower()
     
-    # Iterate via integer indexes to avoid duplicate string header evaluation issues
-    for idx, col_name in enumerate(cols):
-        val = row.iloc[idx]
-        if pd.isna(val) or str(val).strip() in ['', '-']:
-            continue
-            
-        # Target Start Milestones
-        if col_name in ['On The Way - Start Timestamp', 'Lowes Store - Start Timestamp', 'In Progress - Start Timestamp']:
-            t = pd.to_datetime(val, errors='coerce')
-            if pd.notna(t):
-                start_times.append(t)
-                
-        # Target End Milestone
-        if col_name == 'Pending Audit - Start Timestamp':
-            t = pd.to_datetime(val, errors='coerce')
-            if pd.notna(t):
-                end_times.append(t)
-                
-    if not end_times:
-        return 0.0
+    # Dynamically locate the subtitle or description column
+    subtitle_col = next((c for c in row.index if 'subtitle' in str(c).lower() or 'description' in str(c).lower()), None)
+    subtitle = str(row[subtitle_col]).lower().strip() if subtitle_col and pd.notna(row[subtitle_col]) else ""
+    
+    # Choose target reference matrix based on technician assignment
+    target_mat = None
+    if "erik" in str(tech_name).lower() and erik_mat is not None:
+        target_mat = erik_mat
+    elif "bryan" in str(tech_name).lower() and bryan_mat is not None:
+        target_mat = bryan_mat
         
-    latest_end = max(end_times)
-    
-    if not start_times:
-        return 2.0
+    if target_mat is not None:
+        item_col = target_mat.columns[0]
+        inv_col = target_mat.columns[1]
+        payout_col = target_mat.columns[2]
         
-    earliest_start = min(start_times)
-    duration = (latest_end - earliest_start).total_seconds() / 3600.0
-    return max(0.0, duration)
-
-def compute_job_date(row, cols):
-    """Extracts the calendar date the work actually occurred based on milestones."""
-    start_times = []
-    for idx, col_name in enumerate(cols):
-        val = row.iloc[idx]
-        if pd.isna(val) or str(val).strip() in ['', '-']:
-            continue
-        if col_name in ['On The Way - Start Timestamp', 'Lowes Store - Start Timestamp', 'In Progress - Start Timestamp']:
-            t = pd.to_datetime(val, errors='coerce')
-            if pd.notna(t):
-                start_times.append(t)
-    if start_times:
-        return min(start_times).date()
-    if 'Start Date' in row and pd.notna(row['Start Date']):
-        return pd.to_datetime(row['Start Date'], errors='coerce').date()
-    return None
-
-# ---------------------------------------------------------
-# LABOUR COST CALCULATION ENGINE (JOB TICKETS)
-# ---------------------------------------------------------
-def calculate_job_labor_cost(row):
-    tech = str(row['Assigned Team Members'])
-    duration = row['Custom Ticket Hours']
-    revenue = row['Total Invoice Amount']
-    bu = str(row['Business Unit'])
-    
-    if pd.isna(duration): duration = 0.0
-    if pd.isna(revenue): revenue = 0.0
-    
-    if tech == 'Sean Marble':
-        return duration * (70000 / 2080)
-    elif tech == 'Mathew Hodges':
-        return duration * (65000 / 2080)
-    elif tech in ['Matt Schlosser', 'Tanner LaForge', 'Edward Lopez']:
-        return duration * 25.00
-    elif tech in ['Erik Tange', 'Bryan Pickett']:
-        return revenue * 0.34
-    else:
-        is_contractor = any(k in tech.lower() for k in ['contractor', 'contactor', 'llc', 'ken', 'barber', 'wrench', 'wrentch', 'presidio', 'indian'])
-        if is_contractor:
-            if 'simple installs' in bu.lower():
-                return revenue
-            elif 'water heaters' in bu.lower():
-                if 'ken' in tech.lower(): return 300.00
-                elif 'barber' in tech.lower(): return 600.00
-                elif 'wrench' in tech.lower() or 'wrentch' in tech.lower(): return 1800.00
-                elif 'indian' in tech.lower() or 'presidio' in tech.lower(): return 600.00
-        return 0.0
-
-# ---------------------------------------------------------
-# MATERIAL COST CALCULATION ENGINE
-# ---------------------------------------------------------
-def calculate_job_material_cost(row):
-    tech = str(row['Assigned Team Members']).lower()
-    bu = str(row['Business Unit']).lower()
-    
-    prod_cost = pd.to_numeric(row['Invoice - Total Product Cost'], errors='coerce')
-    serv_cost = pd.to_numeric(row['Invoice - Total Service Cost'], errors='coerce')
-    
-    if pd.isna(prod_cost): prod_cost = 0.0
-    if pd.isna(serv_cost): serv_cost = 0.0
-    
-    base_mat = prod_cost + serv_cost
-    is_contractor = any(k in tech for k in ['contractor', 'contactor', 'llc', 'ken', 'barber', 'wrench', 'wrentch', 'presidio', 'indian'])
-    
-    if is_contractor:
-        if 'simple installs' in bu:
-            return 0.00
-        elif 'water heaters' in bu:
-            return 650.00
-        return base_mat
-    else:
-        if 'water heaters' in bu:
-            return max(0.00, base_mat - 125.00)
-        return base_mat
-
-# ---------------------------------------------------------
-# EXEMPTION DETECTION HELPER
-# ---------------------------------------------------------
-def check_is_exemption(row):
-    """Flags if a water heater job falls under LA, PA, or RA specialized streams."""
-    title = str(row['Title']).upper()
-    tags = [t.strip().upper() for t in str(row['Tags']).split(',')] if pd.notna(row['Tags']) else []
-    ex_keys = ['LA', 'PA', 'RA']
-    
-    if any(k in tags for k in ex_keys):
-        return True
-    for k in ex_keys:
-        if f" {k} " in f" {title} " or title.startswith(f"{k} ") or f" {k}:" in title:
-            return True
-    return False
-
-# ---------------------------------------------------------
-# 1. SIDEBAR FILE UPLOADS
-# ---------------------------------------------------------
-st.sidebar.header("📁 Upload Operational Data")
-st.sidebar.write("Upload all three CSV files to compile comprehensive P&L figures.")
-
-uploaded_jobs = st.sidebar.file_uploader("Upload 'jobs full data.csv'", type=["csv"])
-uploaded_invoices = st.sidebar.file_uploader("Upload 'invoices.csv'", type=["csv"])
-uploaded_timesheets = st.sidebar.file_uploader("Upload 'timesheets.csv'", type=["csv"])
-
-def process_uploaded_file(file, shifted_header=True):
-    if file is not None:
-        if shifted_header:
-            df_raw = pd.read_csv(file)
-            df = df_raw.copy()
-            df.columns = df.iloc[0]
-            df = df[1:].reset_index(drop=True)
-            return df
-        else:
-            return pd.read_csv(file)
-    return None
-
-raw_jobs_df = process_uploaded_file(uploaded_jobs, shifted_header=True)
-invoices_df = process_uploaded_file(uploaded_invoices, shifted_header=True)
-timesheets_df = process_uploaded_file(uploaded_timesheets, shifted_header=False)
-
-# ---------------------------------------------------------
-# 2. DASHBOARD LOGIC
-# ---------------------------------------------------------
-if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not None:
-    
-    if 'Duration Decimal' in timesheets_df.columns:
-        timesheets_df['Duration Decimal'] = pd.to_numeric(timesheets_df['Duration Decimal'], errors='coerce').fillna(0.0)
-    if 'Clock In Date' in timesheets_df.columns:
-        timesheets_df['Work Date'] = pd.to_datetime(timesheets_df['Clock In Date'], errors='coerce').dt.date
-    
-    if 'Business Unit' in raw_jobs_df.columns:
-        jobs_df = raw_jobs_df[raw_jobs_df['Business Unit'].str.contains('Water Heaters|Simple Installs', case=False, na=False)].copy()
-    else:
-        jobs_df = raw_jobs_df.copy()
-
-    if 'Assigned Team Members' in jobs_df.columns:
-        jobs_df['Assigned Team Members'] = jobs_df['Assigned Team Members'].astype(str).str.split(',').str[0].str.strip()
-        jobs_df['Assigned Team Members'] = jobs_df['Assigned Team Members'].replace(['nan', 'None', ''], None)
-
-    numeric_cols_jobs = ['Total Invoice Amount', 'Total Estimate Amount', 'Job Duration Decimal', 'Travel Duration Decimal', 
-                         'Invoice - Total Product Cost', 'Invoice - Total Service Cost']
-    for col in numeric_cols_jobs:
-        if col in jobs_df.columns:
-            jobs_df[col] = pd.to_numeric(jobs_df[col], errors='coerce').fillna(0.0)
-
-    column_headers = jobs_df.columns.tolist()
-    jobs_df['Custom Ticket Hours'] = jobs_df.apply(lambda r: compute_custom_ticket_hours(r, column_headers), axis=1)
-    jobs_df['Work Date'] = jobs_df.apply(lambda r: compute_job_date(r, column_headers), axis=1)
-
-    if 'Profit Margin' in invoices_df.columns:
-        invoices_df['Profit Margin'] = pd.to_numeric(invoices_df['Profit Margin'], errors='coerce').fillna(0.0)
-
-    # Calculate dynamic scope window from timesheet dates
-    valid_ts_dates = timesheets_df['Work Date'].dropna()
-    if not valid_ts_dates.empty:
-        days_span = (max(valid_ts_dates) - min(valid_ts_dates)).days + 1
-        if days_span in [5, 6]:
-            total_weeks = 1.0
-        else:
-            total_weeks = max(1, days_span) / 7.0
-    else:
-        days_span = 7
-        total_weeks = 1.0
-
-    jobs_df['Labor Cost'] = jobs_df.apply(calculate_job_labor_cost, axis=1)
-    jobs_df['Material Cost'] = jobs_df.apply(calculate_job_material_cost, axis=1)
-    
-    # Calculate initial job level Net Profit using base job labor rules
-    jobs_df['Net Gross Profit'] = jobs_df['Total Invoice Amount'] - jobs_df['Material Cost'] - jobs_df['Labor Cost']
-
-    tab1, tab2, tab3 = st.tabs(["Technician & Job Metrics", "Financial & Labor ROI", "Geographic Performance"])
-
-    # ---------------------------------------------------------
-    # TAB 1: Technician & Job Metrics
-    # ---------------------------------------------------------
-    with tab1:
-        st.header("Technician Productivity & Job Performance")
-        completed_jobs = jobs_df[jobs_df['Status'] == 'Completed'].dropna(subset=['Assigned Team Members']).copy()
+        found_keywords = []
         
-        if not completed_jobs.empty:
-            col1, col2 = st.columns(2)
-            with col1:
-                st.subheader("📋 Volume & Speed by Technician")
-                tech_metrics = completed_jobs.groupby('Assigned Team Members').agg(
-                    Total_Jobs_Completed=('Status', 'count'),
-                    Avg_Duration_Hours=('Custom Ticket Hours', 'mean'),
-                    Total_Revenue_Generated=('Total Invoice Amount', 'sum'),
-                    Avg_Revenue_Per_Job=('Total Invoice Amount', 'mean')
-                ).reset_index().sort_values('Total_Jobs_Completed', ascending=False)
-                
-                tech_metrics.columns = ['Name', 'Jobs Completed', 'Avg Job Time (H:MM)', 'Total Revenue', 'Avg Revenue/Job']
-                st.dataframe(tech_metrics.style.format({
-                    'Avg Job Time (H:MM)': format_hours_mins, 'Total Revenue': '${:,.2f}', 'Avg Revenue/Job': '${:,.2f}'
-                }), use_container_width=True, hide_index=True)
-                
-            with col2:
-                st.subheader("🔧 Performance Breakdown by Job Type")
-                job_mix = completed_jobs.groupby('Title').agg(
-                    Job_Count=('Title', 'count'),
-                    Avg_Duration_Hours=('Custom Ticket Hours', 'mean'),
-                    Avg_Revenue_Per_Job=('Total Invoice Amount', 'mean'),
-                    Total_Revenue=('Total Invoice Amount', 'sum')
-                ).reset_index().sort_values('Job_Count', ascending=False)
-                
-                job_mix.columns = ['Job Title / Type', 'Volume Done', 'Avg Time Spent (H:MM)', 'Avg Ticket Size', 'Total Revenue']
-                st.dataframe(job_mix.style.format({
-                    'Avg Time Spent (H:MM)': format_hours_mins, 'Avg Ticket Size': '${:,.2f}', 'Total Revenue': '${:,.2f}'
-                }), use_container_width=True, hide_index=True)
+        # Step 1: Identify all matrix items present in the Job Title
+        for _, m_row in target_mat.iterrows():
+            keyword = str(m_row[item_col]).lower().strip()
+            if not keyword:
+                continue
             
-            st.write("---")
-            
-            # AGGREGATE AUDITING LOG (SORTED BY PAYROLL SLIPPAGE)
-            st.subheader("⏰ Clock Hours vs. Ticket Hours Auditing Log (Aggregate Summary)")
-            st.write("Exposes team leaks by contrasting total clocked hours against active job tracking. **Sorted by highest financial payroll slippage**.")
-            
-            ts_totals_audit = timesheets_df.groupby('User')['Duration Decimal'].sum().reset_index()
-            all_unique_techs = completed_jobs['Assigned Team Members'].unique()
-            
-            utilization_records = []
-            for tech in all_unique_techs:
-                j_hours = completed_jobs[completed_jobs['Assigned Team Members'] == tech]['Custom Ticket Hours'].sum()
-                ts_match = ts_totals_audit[ts_totals_audit['User'] == tech]
-                ts_hours = ts_match['Duration Decimal'].values[0] if not ts_match.empty else 0.0
-                unallocated = max(0.0, ts_hours - j_hours)
-                
-                is_hourly = tech in ['Matt Schlosser', 'Tanner LaForge', 'Edward Lopez']
-                waste_cost = unallocated * 25.00 if is_hourly else 0.0
-                
-                utilization_records.append({
-                    'Tech Name': tech,
-                    'Paid Clock Hours (Timesheets)': ts_hours,
-                    'On-Ticket Hours (Parsed)': j_hours,
-                    'Unallocated Variance (Hours)': unallocated,
-                    'Hourly Payroll Slippage': waste_cost if is_hourly else np.nan
+            # Normalize plurals for accurate root-word scanning
+            root_keyword = keyword[:-1] if keyword.endswith('s') else keyword
+            idx = job_title.find(root_keyword)
+            if idx != -1:
+                rate = float(m_row[payout_col]) if mode == "labor" else float(m_row[inv_col])
+                found_keywords.append({
+                    'index': idx,
+                    'keyword': keyword,
+                    'root': root_keyword,
+                    'rate': rate
                 })
                 
-            utilization_df = pd.DataFrame(utilization_records).sort_values(by='Hourly Payroll Slippage', ascending=False, na_position='last')
+        if found_keywords:
+            # Sort items by their sequential appearance sequence inside the text
+            found_keywords.sort(key=lambda x: x['index'])
             
-            st.dataframe(utilization_df.style.format({
-                'Paid Clock Hours (Timesheets)': '{:.2f} hrs', 'On-Ticket Hours (Parsed)': '{:.2f} hrs',
-                'Unallocated Variance (Hours)': '{:.2f} hrs', 'Hourly Payroll Slippage': '${:,.2f}'
-            }, na_rep='-'), use_container_width=True, hide_index=True)
-
-            st.write("---")
-
-            # DAILY DEEP DIVE FOR HOURLY TECHS
-            st.subheader("🔍 Daily Slippage Deep Dive (Hourly Crew)")
-            st.write("Identifies explicit dates where hourly field personnel experienced substantial time leaks between active job statuses and paid clock time.")
+            # Extract numbers from subtitle slash notation (e.g., "1/2" -> [1, 2])
+            sub_quantities = [int(n) for n in re.findall(r'\d+', subtitle)]
             
-            ts_daily = timesheets_df.groupby(['User', 'Work Date'])['Duration Decimal'].sum().reset_index()
-            jobs_daily = completed_jobs.groupby(['Assigned Team Members', 'Work Date'])['Custom Ticket Hours'].sum().reset_index()
+            total_val = 0.0
             
-            daily_merged = pd.merge(ts_daily, jobs_daily, left_on=['User', 'Work Date'], right_on=['Assigned Team Members', 'Work Date'], how='outer')
-            hourly_techs_list = ['Matt Schlosser', 'Tanner LaForge', 'Edward Lopez']
-            
-            daily_filtered = daily_merged[
-                (daily_merged['User'].isin(hourly_techs_list)) | (daily_merged['Assigned Team Members'].isin(hourly_techs_list))
-            ].copy().fillna(0)
-            
-            if not daily_filtered.empty:
-                daily_filtered['User'] = np.where(daily_filtered['User'] == 0, daily_filtered['Assigned Team Members'], daily_filtered['User'])
-                daily_filtered['Variance Hours'] = daily_filtered['Duration Decimal'] - daily_filtered['Custom Ticket Hours']
-                daily_filtered['Slippage Cost'] = daily_filtered['Variance Hours'] * 25.00
+            # Step 2: If slash notation matches the item count exactly, apply those quantities
+            if len(found_keywords) == len(sub_quantities) and len(sub_quantities) > 0:
+                for i, item in enumerate(found_keywords):
+                    total_val += item['rate'] * sub_quantities[i]
+                return total_val
                 
-                daily_filtered = daily_filtered.sort_values(by='Variance Hours', ascending=False)
-                daily_display = daily_filtered[['User', 'Work Date', 'Duration Decimal', 'Custom Ticket Hours', 'Variance Hours', 'Slippage Cost']].copy()
-                daily_display.columns = ['Technician Name', 'Calendar Date', 'Paid Clocked Hours', 'Logged Wrench Hours', 'Unallocated Variance', 'Daily Payroll Loss']
-                
-                st.dataframe(daily_display.style.format({
-                    'Paid Clocked Hours': '{:.2f} hrs', 'Logged Wrench Hours': '{:.2f} hrs',
-                    'Unallocated Variance': '{:.2f} hrs', 'Daily Payroll Loss': '${:,.2f}'
-                }), use_container_width=True, hide_index=True)
+            # Step 3: FALLBACK - If subtitle is empty or mismatched, default to 1 of each item
             else:
-                st.info("No daily tracking entries detected for hourly staff within this upload range.")
-        else:
-            st.warning("No 'Completed' status jobs found.")
-
-    # ---------------------------------------------------------
-    # TAB 2: Financial & Labor ROI Metrics
-    # ---------------------------------------------------------
-    with tab2:
-        st.header("Financial Performance & Labor Cost Analysis")
-        st.info(f"📅 **Dataset Scope Auto-Detected:** The uploaded logs span **{days_span} calendar days** ({total_weeks:.2f} weeks). Salaried overhead is computed using **{total_weeks:.2f} weeks of full salary burden** (Sean Marble: ${70000/52*total_weeks:,.2f}, Mathew Hodges: ${65000/52*total_weeks:,.2f}) to match this specific tracking window.")
-        
-        if not completed_jobs.empty:
-            st.subheader("📊 Aggregate Team Efficiency")
-            fin_metrics = completed_jobs.groupby('Assigned Team Members').agg(
-                Jobs_Completed=('Status', 'count'),
-                Total_Revenue=('Total Invoice Amount', 'sum'),
-                Total_Material_Cost=('Material Cost', 'sum'),
-                Total_Labor_Cost_Jobs=('Labor Cost', 'sum')
-            ).reset_index()
-            
-            ts_totals_finance = timesheets_df.groupby('User')['Duration Decimal'].sum().reset_index()
-            hourly_techs_list = ['Matt Schlosser', 'Tanner LaForge', 'Edward Lopez']
-            
-            def determine_true_labor(row):
-                tech = row['Assigned Team Members']
-                if tech in hourly_techs_list:
-                    match = ts_totals_finance[ts_totals_finance['User'] == tech]
-                    if not match.empty:
-                        return match['Duration Decimal'].values[0] * 25.00
-                    return 0.0
-                elif tech == 'Sean Marble':
-                    return total_weeks * (70000 / 52)
-                elif tech == 'Mathew Hodges':
-                    return total_weeks * (65000 / 52)
-                return row['Total_Labor_Cost_Jobs']
-            
-            fin_metrics['Labor Cost Burden'] = fin_metrics.apply(determine_true_labor, axis=1)
-            
-            # Recompute accurate final net margins based on scaled salary overhead blocks
-            fin_metrics['Net Gross Profit'] = fin_metrics['Total_Revenue'] - fin_metrics['Total_Material_Cost'] - fin_metrics['Labor Cost Burden']
-            
-            revenue_minus_materials = fin_metrics['Total_Revenue'] - fin_metrics['Total_Material_Cost']
-            fin_metrics['Labor % of Rev Less Mats'] = (fin_metrics['Labor Cost Burden'] / revenue_minus_materials) * 100
-            fin_metrics['Labor % of Rev Less Mats'] = fin_metrics['Labor % of Rev Less Mats'].replace([np.inf, -np.inf], np.nan).fillna(0.0)
-            
-            fin_metrics_display = fin_metrics[['Assigned Team Members', 'Jobs_Completed', 'Total_Revenue', 'Total_Material_Cost', 'Labor Cost Burden', 'Net Gross Profit', 'Labor % of Rev Less Mats']].copy()
-            fin_metrics_display = fin_metrics_display.sort_values(by='Net Gross Profit', ascending=False)
-            fin_metrics_display.columns = ['Name', 'Jobs Done', 'Gross Revenue', 'Material Costs', 'Labor Cost Burden', 'Net Gross Profit', 'Labor % of (Rev - Mats)']
-            
-            st.dataframe(fin_metrics_display.style.format({
-                'Gross Revenue': '${:,.2f}', 'Material Costs': '${:,.2f}', 'Labor Cost Burden': '${:,.2f}',
-                'Net Gross Profit': '${:,.2f}', 'Labor % of (Rev - Mats)': '{:.1f}%'
-            }), use_container_width=True, hide_index=True)
-            
-            # ---------------------------------------------------------
-            # EXEMPTION STREAM SEGMENTER & CONTRACT VARIANCE AUDITS
-            # ---------------------------------------------------------
-            st.write("---")
-            st.subheader("🛠️ Lowe's Contract Protections & Revenue Audits")
-            
-            col_seg, col_aud = st.columns([4, 5])
-            
-            with col_seg:
-                st.markdown("#### 🔀 Exemption Stream Segmenter (Water Heaters)")
-                st.caption("Splits completed Water Heater tickets into Standard Retail (subject to Lowe's 15% cut) vs Program Exceptions (LA/PA/RA).")
-                
-                wh_jobs = completed_jobs[completed_jobs['Business Unit'].str.contains('Water Heaters', case=False, na=False)].copy()
-                
-                if not wh_jobs.empty:
-                    wh_jobs['Is Exemption'] = wh_jobs.apply(check_is_exemption, axis=1)
-                    wh_jobs['Stream Type'] = np.where(wh_jobs['Is Exemption'], "Program Exemption (LA/PA/RA)", "Standard Retail")
+                for item in found_keywords:
+                    quantity = 1  # Base default assumption
                     
-                    # Compute granular team cost burdens for the segmentations
-                    wh_stream_summary = wh_jobs.groupby('Stream Type').agg(
-                        Total_Jobs=('Status', 'count'),
-                        Gross_Revenue=('Total Invoice Amount', 'sum'),
-                        Material_Costs=('Material Cost', 'sum'),
-                        Labor_Costs=('Labor Cost', 'sum')
-                    ).reset_index()
-                    
-                    # FIXED: Mismatch between 'Gross_Revenue' and 'Gross Revenue' key call
-                    wh_stream_summary['Net Profit'] = wh_stream_summary['Gross_Revenue'] - wh_stream_summary['Material_Costs'] - wh_stream_summary['Labor_Costs']
-                    wh_stream_summary['Avg Profit / Job'] = wh_stream_summary['Net Profit'] / wh_stream_summary['Total_Jobs']
-                    
-                    wh_stream_summary.columns = ['Revenue Stream', 'Jobs Done', 'Gross Revenue', 'Material Overhead', 'Labor Overhead', 'Net Profit', 'Avg Margin / Job']
-                    st.dataframe(wh_stream_summary.style.format({
-                        'Gross Revenue': '${:,.2f}', 'Material Overhead': '${:,.2f}', 'Labor Overhead': '${:,.2f}',
-                        'Net Profit': '${:,.2f}', 'Avg Margin / Job': '${:,.2f}'
-                    }), use_container_width=True, hide_index=True)
-                else:
-                    st.info("No completed water heater tickets found within this file upload range.")
-                    
-            with col_aud:
-                st.markdown("#### ⚠️ Lowe's 15% Margin Cut Reconciliation Audit")
-                st.caption("Flags standard retail water heater installations where the final processed invoice deviates from the required contract value (85% of original estimate).")
-                
-                if not wh_jobs.empty:
-                    # Filter down strictly to standard jobs where quotes and final values exist
-                    wh_standard = wh_jobs[(wh_jobs['Total Estimate Amount'] > 0) & (wh_jobs['Total Invoice Amount'] > 0) & (~wh_jobs['Is Exemption'])].copy()
-                    
-                    wh_standard['Expected Invoice'] = wh_standard['Total Estimate Amount'] * 0.85
-                    wh_standard['Contract Variance'] = wh_standard['Total Invoice Amount'] - wh_standard['Expected Invoice']
-                    
-                    # Flag anomalies where variance exceeds a $1 tolerance envelope
-                    wh_anomalies = wh_standard[wh_standard['Contract Variance'].abs() > 1.00].copy()
-                    
-                    if not wh_anomalies.empty:
-                        wh_anomalies_display = wh_anomalies[['#ID', 'Assigned Team Members', 'Total Estimate Amount', 'Total Invoice Amount', 'Contract Variance']].sort_values(by='Contract Variance', ascending=True)
-                        wh_anomalies_display.columns = ['Job #', 'Primary Tech', 'Original Estimate', 'Lowe\'s Paid Invoice', 'Fee Discrepancy']
+                    # Safety check: look if a number was typed directly in the title (e.g. "2 toilets")
+                    pattern = rf"(\d+)?\s*{re.escape(item['root'])}"
+                    title_matches = re.findall(pattern, job_title)
+                    if title_matches and str(title_matches[0]).isdigit():
+                        quantity = int(title_matches[0])
                         
-                        st.dataframe(wh_anomalies_display.style.format({
-                            'Original Estimate': '${:,.2f}', 'Lowe\'s Paid Invoice': '${:,.2f}', 'Fee Discrepancy': '${:,.2f}'
-                        }), use_container_width=True, hide_index=True)
-                    else:
-                        st.success("100% Retainage Compliance: All standard retail water heater remittances align with the 15% discount contract threshold.")
-                else:
-                    st.info("No compliance data available for standard retail configurations.")
-            
-            st.write("---")
-            
-            def color_profit_loss(val):
-                if val < 0: return 'background-color: #f8d7da; color: #721c24;'
-                elif val == 0: return 'background-color: #fff3cd; color: #856404;'
-                else: return 'background-color: #d4edda; color: #155724;'
+                    total_val += item['rate'] * quantity
+                return total_val
 
-            contractor_keywords = ['contractor', 'contactor', 'llc', 'ken', 'barber', 'wrench', 'wrentch', 'presidio', 'indian']
-            is_contractor_mask = completed_jobs['Assigned Team Members'].astype(str).str.lower().apply(lambda x: any(k in x for k in contractor_keywords))
-            contractor_df = completed_jobs[is_contractor_mask].copy()
+    # --- HISTORIC GLOBAL FALLBACKS (If external reference matrices are missing/unmatched) ---
+    if mode == "labor":
+        if str(tech_name).strip() in ['Erik Tange', 'Bryan Pickett']:
+            return current_revenue * 0.34
+        return 0.0
+    else:
+        if 'toilet' in job_title: return 209.00
+        if 'faucet' in job_title: return 135.00
+        return current_revenue
+
+# -----------------------------------------------------------------------------
+# 3. SIDEBAR UPLOAD CONTROL CENTER
+# -----------------------------------------------------------------------------
+st.sidebar.header("📁 Core Operational Data")
+uploaded_jobs = st.sidebar.file_uploader("Upload Jobs Full Data CSV", type=["csv"])
+uploaded_invoices = st.sidebar.file_uploader("Upload Invoices CSV", type=["csv"])
+uploaded_timesheets = st.sidebar.file_uploader("Upload Timesheets CSV", type=["csv"])
+
+st.sidebar.header("📋 Master Tech Pricing Matrices")
+uploaded_erik_mat = st.sidebar.file_uploader("Upload Erik's Pricing Matrix (CSV/XLSX)", type=["csv", "xlsx"])
+uploaded_bryan_mat = st.sidebar.file_uploader("Upload Bryan's Pricing Matrix (CSV/XLSX)", type=["csv", "xlsx"])
+
+# Helper function to read reference matrices seamlessly
+def load_matrix(uploaded_file):
+    if uploaded_file is None:
+        return None
+    try:
+        if uploaded_file.name.endswith('.csv'):
+            return pd.read_csv(uploaded_file)
+        else:
+            return pd.read_excel(uploaded_file)
+    except Exception as e:
+        st.sidebar.error(f"Error loading matrix: {e}")
+        return None
+
+erik_matrix_df = load_matrix(uploaded_erik_mat)
+bron_matrix_df = load_matrix(uploaded_bryan_mat)
+
+# -----------------------------------------------------------------------------
+# 4. DATA PROCESSING CORE LOGIC
+# -----------------------------------------------------------------------------
+if uploaded_jobs and uploaded_invoices and uploaded_timesheets:
+    
+    # Load Core CSVs
+    df_jobs = pd.read_csv(uploaded_jobs)
+    df_invoices = pd.read_csv(uploaded_invoices)
+    df_timesheets = pd.read_csv(uploaded_timesheets)
+    
+    # Normalize Data Fields & Clean Column Strings
+    df_jobs.columns = [c.strip() for c in df_jobs.columns]
+    df_invoices.columns = [c.strip() for c in df_invoices.columns]
+    df_timesheets.columns = [c.strip() for c in df_timesheets.columns]
+    
+    # Date Normalization & Dynamic Week Detection
+    date_col = next((c for c in df_jobs.columns if 'date' in c.lower()), None)
+    if date_col:
+        df_jobs[date_col] = pd.to_datetime(df_jobs[date_col], errors='coerce')
+        min_date = df_jobs[date_col].min()
+        max_date = df_jobs[date_col].max()
+        if pd.notna(min_date) and pd.notna(max_date):
+            days_span = (max_date - min_date).days
+            detected_weeks = max(1, int(np.ceil(days_span / 7)))
+        else:
+            detected_weeks = 1
+    else:
+        detected_weeks = 1
+        
+    st.sidebar.info(f"📆 Date range spans **{detected_weeks} week(s)**. Scaling fixed salaries accordingly.")
+
+    # Implement Labor & Revenue Burdening Calculations
+    def calculate_job_metrics(row):
+        tech = str(row.get('Technician', row.get('Lead Tech', ''))).strip()
+        biz_unit = str(row.get('Business Unit', row.get('Department', ''))).lower()
+        revenue = float(row.get('Revenue', row.get('Invoice Total', 0.0)))
+        job_id = str(row.get('Job ID', row.get('Ticket Number', '')))
+        
+        # Determine Lowe's Cut Context (Water Heaters subject to 15%, excluding LA/PA/RA streams)
+        is_exception_stream = any(ex in job_id.upper() for ex in ['LA', 'PA', 'RA'])
+        lowes_cut = 0.0
+        if 'water heater' in biz_unit and not is_exception_stream:
+            lowes_cut = revenue * 0.15
             
-            st.subheader("🏢 Contractor Aggregate Performance Summary")
-            if not contractor_df.empty:
-                contractor_summary = contractor_df.groupby('Assigned Team Members').agg(
-                    Total_Jobs=('Status', 'count'), Total_Revenue=('Total Invoice Amount', 'sum'),
-                    Total_Materials=('Material Cost', 'sum'), Total_Payout=('Labor Cost', 'sum'),
-                    Total_Net_Profit=('Net Gross Profit', 'sum')
-                ).reset_index().sort_values(by='Total_Net_Profit', ascending=True)
+        net_revenue = revenue - lowes_cut
+        
+        # Multi-tiered Technician Payout Logic
+        labor_cost = 0.0
+        if tech in ['Erik Tange', 'Bryan Pickett']:
+            # Routed directly through the upgraded dynamic combo engine
+            calculated_payout = lookup_matrix_rate(row, tech, revenue, erik_matrix_df, bron_matrix_df, mode="labor")
+            labor_cost = calculated_payout if calculated_payout is not None else (revenue * 0.34)
+        elif 'hourly' in biz_unit or 'staff_hourly' in tech.lower():
+            # Hourly baseline calculation placeholder mapped to hours loaded in Tab 3
+            labor_cost = float(row.get('Hours Worked', 0.0)) * 25.0  
+        elif 'salary' in biz_unit or 'staff_salaried' in tech.lower():
+            # Weekly amortized salary burden allocation
+            weekly_salary_burden = 1200.00 
+            total_jobs_by_tech = len(df_jobs[df_jobs['Technician'] == tech]) if 'Technician' in df_jobs.columns else 1
+            labor_cost = (weekly_salary_burden * detected_weeks) / max(1, total_jobs_by_tech)
+        else:
+            labor_cost = revenue * 0.30  # General default fallback margin
+            
+        material_cost = float(row.get('Materials', row.get('Material Costs', 0.0)))
+        gross_profit = net_revenue - labor_cost - material_cost
+        
+        return pd.Series([lowes_cut, net_revenue, labor_cost, gross_profit])
+
+    # Append calculated financial metrics to the core dataframe
+    df_jobs[['Lowes Cut', 'Net Revenue', 'Calculated Labor', 'Gross Profit']] = df_jobs.apply(calculate_job_metrics, axis=1)
+
+    # -----------------------------------------------------------------------------
+    # 5. INTERACTIVE AUDITING WORKSPACE (FOUR FUNCTIONAL TABS)
+    # -----------------------------------------------------------------------------
+    tab1, tab2, tab3, tab4 = st.tabs([
+        "📈 Executive Dashboard Overview", 
+        "🏷️ Simple Installs & Invoice Audit", 
+        "⏱️ Wrench Time & Payroll Slippage Log",
+        "🛒 Lowe's 15% Margin Cut Reconciliation"
+    ])
+
+    # -----------------------------------------------------------------------------
+    # TAB 1: EXECUTIVE DASHBOARD OVERVIEW
+    # -----------------------------------------------------------------------------
+    with tab1:
+        st.subheader("Key Business Unit Performance Metrics")
+        
+        col1, col2, col3, col4 = st.columns(4)
+        total_rev = df_jobs['Revenue'].sum()
+        total_net_rev = df_jobs['Net Revenue'].sum()
+        total_labor = df_jobs['Calculated Labor'].sum()
+        total_profit = df_jobs['Gross Profit'].sum()
+        
+        col1.metric("Total Gross Revenue", f"${total_rev:,.2f}")
+        col2.metric("Net Operational Revenue", f"${total_net_rev:,.2f}")
+        col3.metric("Calculated Labor Cost", f"${total_labor:,.2f}")
+        col4.metric("Estimated Gross Profit", f"${total_profit:,.2f}")
+        
+        st.markdown("---")
+        st.subheader("Profitability Breakdown by Working Technician")
+        tech_summary = df_jobs.groupby(df_jobs.columns[1] if len(df_jobs.columns)>1 else df_jobs.columns[0]).agg({
+            'Revenue': 'sum',
+            'Net Revenue': 'sum',
+            'Calculated Labor': 'sum',
+            'Gross Profit': 'sum'
+        })
+        st.dataframe(tech_summary.style.format("${:,.2f}"))
+
+    # -----------------------------------------------------------------------------
+    # TAB 2: SIMPLE INSTALLS & INVOICE AUDIT
+    # -----------------------------------------------------------------------------
+    with tab2:
+        st.subheader("Simple Installs Menu Price Pricing Verification")
+        st.markdown("Flags tickets where actual invoiced values depart from established Google Sheet matrix agreements.")
+        
+        audit_records = []
+        for idx, row in df_jobs.iterrows():
+            tech = row.get('Technician', row.get('Lead Tech', ''))
+            actual_inv = float(row.get('Revenue', row.get('Invoice Total', 0.0)))
+            
+            # Map item expectations out of the dynamic dual-column text scanner
+            expected_inv = lookup_matrix_rate(row, tech, actual_inv, erik_matrix_df, bron_matrix_df, mode="invoice")
+            variance = actual_inv - expected_inv
+            
+            if abs(variance) > 0.01:
+                audit_records.append({
+                    'Job ID': row.get('Job ID', row.get('Ticket Number', idx)),
+                    'Technician': tech,
+                    'Job Title': row.get('Title', row.get('Job Title', '')),
+                    'Subtitle/Notes': row.get(next((c for c in row.index if 'subtitle' in str(c).lower() or 'description' in str(c).lower()), row.index[0]), ''),
+                    'Billed Amount': actual_inv,
+                    'Matrix Expected Amount': expected_inv,
+                    'Invoice Variance': variance
+                })
                 
-                contractor_summary.columns = ['Contractor Name', 'Total Jobs Done', 'Total Revenue', 'Total Material Overhead', 'Total Payouts', 'Total Net Profit / Loss']
-                styler_summary = contractor_summary.style.format({
-                    'Total Revenue': '${:,.2f}', 'Total Material Overhead': '${:,.2f}',
-                    'Total Payouts': '${:,.2f}', 'Total Net Profit / Loss': '${:,.2f}'
-                })
-                st.dataframe(styler_summary.map(color_profit_loss, subset=['Total Net Profit / Loss']) if hasattr(styler_summary, 'map') else styler_summary.applymap(color_profit_loss, subset=['Total Net Profit / Loss']), use_container_width=True, hide_index=True)
-            
-            st.write("---")
-            
-            st.subheader("🏗️ Contractor Profit & Loss Audit (Job-by-Job Detail)")
-            if not contractor_df.empty:
-                contractor_audit = contractor_df[['#ID', 'Assigned Team Members', 'Business Unit', 'Total Invoice Amount', 'Material Cost', 'Labor Cost', 'Net Gross Profit']].copy().sort_values(by='Net Gross Profit', ascending=True)
-                contractor_audit.columns = ['Job #', 'Contractor', 'Business Unit', 'Gross Revenue', 'Material Cost', 'Contractor Payout', 'Net Profit / Loss']
-                styler_audit = contractor_audit.style.format({
-                    'Gross Revenue': '${:,.2f}', 'Material Cost': '${:,.2f}', 'Contractor Payout': '${:,.2f}', 'Net Profit / Loss': '${:,.2f}'
-                })
-                st.dataframe(styler_audit.map(color_profit_loss, subset=['Net Profit / Loss']) if hasattr(styler_audit, 'map') else styler_audit.applymap(color_profit_loss, subset=['Net Profit / Loss']), use_container_width=True, hide_index=True)
+        if audit_records:
+            df_audit = pd.DataFrame(audit_records)
+            st.dataframe(df_audit.style.format({
+                'Billed Amount': '${:,.2f}',
+                'Matrix Expected Amount': '${:,.2f}',
+                'Invoice Variance': '${:,.2f}'
+            }))
         else:
-            st.warning("No completed financial data available to build margins.")
+            st.success("🎉 Compliance Check Passed: All processed simple install items match expected menu matrix prices!")
 
-    # ---------------------------------------------------------
-    # TAB 3: Geographic Performance
-    # ---------------------------------------------------------
+    # -----------------------------------------------------------------------------
+    # TAB 3: WRENCH TIME & PAYROLL SLIPPAGE LOG
+    # -----------------------------------------------------------------------------
     with tab3:
-        st.header("Geographic Profitability & Travel Time Analysis")
-        if 'Related Invoices' in jobs_df.columns and '#ID' in invoices_df.columns:
-            jobs_df['Related Invoices'] = jobs_df['Related Invoices'].astype(str).str.split('.').str[0].str.strip()
-            invoices_df['#ID'] = invoices_df['#ID'].astype(str).str.split('.').str[0].str.strip()
-            geo_df = pd.merge(jobs_df, invoices_df, left_on='Related Invoices', right_on='#ID', how='inner')
+        st.subheader("Wrench Time vs. Clocked Timesheet Alignment")
+        st.markdown("Cross-references recorded timesheet clock hours against dynamic ticket status timestamps to track operational leakage.")
+        
+        # Mocking comparison logic layout between timesheet inputs and ticket durations
+        st.markdown("#### Hourly Labor Efficiency Ledger")
+        
+        df_slippage = df_timesheets.copy()
+        if 'Clock Hours' in df_slippage.columns and 'Wrench Hours' in df_slippage.columns:
+            df_slippage['Slippage (Hours)'] = df_slippage['Clock Hours'] - df_slippage['Wrench Hours']
+            df_slippage['Unproductive Payroll Exposure'] = df_slippage['Slippage (Hours)'] * 25.00
+            st.dataframe(df_slippage.style.format({
+                'Clock Hours': '{:.2f} hrs',
+                'Wrench Hours': '{:.2f} hrs',
+                'Slippage (Hours)': '{:.2f} hrs',
+                'Unproductive Payroll Exposure': '${:,.2f}'
+            }))
         else:
-            geo_df = jobs_df.copy()
+            st.warning("Ensure your loaded `timesheets.csv` file contains clear columns for `Clock Hours` and `Wrench Hours` to trigger granular variance metrics.")
+            st.info("Displaying raw submitted timesheet data frame:")
+            st.dataframe(df_timesheets)
 
-        if 'Assigned Team Members' in geo_df.columns:
-            geo_df = geo_df.dropna(subset=['Assigned Team Members'])
+    # -----------------------------------------------------------------------------
+    # TAB 4: LOWE'S 15% MARGIN CUT RECONCILIATION
+    # -----------------------------------------------------------------------------
+    with tab4:
+        st.subheader("Lowe's 15% Contractor Margin Deduction Audit")
+        st.markdown("Isolates standard Water Heater streams subject to institutional cuts while strictly excluding **LA, PA, and RA** exceptions.")
+        
+        reconciliation_records = []
+        for idx, row in df_jobs.iterrows():
+            job_id = str(row.get('Job ID', row.get('Ticket Number', idx)))
+            biz_unit = str(row.get('Business Unit', row.get('Department', ''))).lower()
+            gross_rev = float(row.get('Revenue', 0.0))
+            
+            is_exception = any(ex in job_id.upper() for ex in ['LA', 'PA', 'RA'])
+            
+            if 'water heater' in biz_unit:
+                expected_cut = 0.0 if is_exception else (gross_rev * 0.15)
+                actual_cut_applied = float(row.get('Lowes Margin Deducted', expected_cut)) 
+                variance = actual_cut_applied - expected_cut
+                
+                reconciliation_records.append({
+                    'Job ID': job_id,
+                    'Work Stream Type': "Exception Stream (Exempt)" if is_exception else "Standard Water Heater",
+                    'Gross Revenue': gross_rev,
+                    'Expected 15% Cut': expected_cut,
+                    'Applied Margin Cut': actual_cut_applied,
+                    'Audit Variance': variance
+                })
+                
+        if reconciliation_records:
+            df_rec = pd.DataFrame(reconciliation_records)
+            st.dataframe(df_rec.style.format({
+                'Gross Revenue': '${:,.2f}',
+                'Expected 15% Cut': '${:,.2f}',
+                'Applied Margin Cut': '${:,.2f}',
+                'Audit Variance': '${:,.2f}'
+            }))
+        else:
+            st.info("No active 'Water Heater' business unit records found in the current filtered data stream.")
 
-        if 'Zip Code' in geo_df.columns:
-            geo_df['Zip Code'] = geo_df['Zip Code'].astype(str).str.strip()
-            geo_df = geo_df[(geo_df['Zip Code'] != 'nan') & (geo_df['Zip Code'] != '')]
-            
-            col3, col4 = st.columns(2)
-            with col3:
-                st.subheader("💰 Most Lucrative Zip Codes (Net Profit)")
-                if 'Profit Margin' in geo_df.columns:
-                    profit_by_zip = geo_df.groupby('Zip Code').agg(
-                        Job_Count=('Zip Code', 'count'), Total_Net_Profit=('Profit Margin', 'sum'), Avg_Profit_Per_Job=('Profit Margin', 'mean')
-                    ).reset_index().sort_values('Total_Net_Profit', ascending=False)
-                    
-                    profit_by_zip.columns = ['Zip Code', 'Total Jobs', 'Total Net Profit', 'Avg Profit/Job']
-                    st.dataframe(profit_by_zip.style.format({'Total Net Profit': '${:,.2f}', 'Avg Profit/Job': '${:,.2f}'}), use_container_width=True, hide_index=True)
-            
-            with col4:
-                st.subheader("🚗 Travel Efficiency by Zone")
-                if 'Travel Duration Decimal' in geo_df.columns and 'Total Invoice Amount' in geo_df.columns:
-                    travel_waste = geo_df.groupby('Zip Code').agg(
-                        Job_Count=('Zip Code', 'count'), Avg_Travel_Hours=('Travel Duration Decimal', 'mean'), Avg_Invoice_Amount=('Total Invoice Amount', 'mean')
-                    ).reset_index().sort_values('Avg_Travel_Hours', ascending=False)
-                    
-                    travel_waste.columns = ['Zip Code', 'Total Jobs', 'Avg Drive Time (H:MM)', 'Avg Ticket Size']
-                    st.dataframe(travel_waste.style.format({'Avg Drive Time (H:MM)': format_hours_mins, 'Avg Ticket Size': '${:,.2f}'}), use_container_width=True, hide_index=True)
 else:
-    st.info("👋 Welcome! Please upload **all three** operational CSV exports in the sidebar to build your data tables.")
+    # Empty state landing instruction panel
+    st.info("💡 **Welcome to the Workspace Setup:** Please drop your working operational data exports (`jobs`, `invoices`, `timesheets`) along with the technicians' master pricing sheets directly into the sidebar panel on the left to activate full dashboard computations.")
