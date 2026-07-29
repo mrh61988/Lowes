@@ -37,7 +37,7 @@ invoices_df = process_uploaded_file(uploaded_invoices)
 if jobs_df is not None and invoices_df is not None:
     
     # --- Clean numeric & date columns for Jobs ---
-    numeric_cols_jobs = ['Feedback Score', 'Total Invoice Amount', 'Travel Duration Decimal']
+    numeric_cols_jobs = ['Total Invoice Amount', 'Job Duration Decimal', 'Travel Duration Decimal']
     for col in numeric_cols_jobs:
         if col in jobs_df.columns:
             jobs_df[col] = pd.to_numeric(jobs_df[col], errors='coerce')
@@ -50,53 +50,59 @@ if jobs_df is not None and invoices_df is not None:
         invoices_df['Profit Margin'] = pd.to_numeric(invoices_df['Profit Margin'], errors='coerce')
 
     # Create tabs for the different modules
-    tab1, tab2 = st.tabs(["Customer Satisfaction & Quality Control", "Geographic & Territory Performance"])
+    tab1, tab2 = st.tabs(["Technician & Job Performance", "Geographic & Territory Performance"])
 
     # ---------------------------------------------------------
-    # TAB 1: Customer Satisfaction & Quality Control
+    # TAB 1: Technician & Job Performance (Replacing Blank Feedback)
     # ---------------------------------------------------------
     with tab1:
-        st.header("Customer Satisfaction Analysis")
+        st.header("Technician Productivity & Efficiency")
         
-        # Filter out empty feedback scores
-        feedback_df = jobs_df.dropna(subset=['Feedback Score']).copy()
+        # Filter out jobs without assigned team members or duration
+        valid_jobs = jobs_df.dropna(subset=['Assigned Team Members', 'Job Duration Decimal']).copy()
         
-        if not feedback_df.empty:
-            col1, col2 = st.columns(2)
+        col1, col2 = st.columns(2)
+        
+        # A. Total Jobs Completed by Tech
+        with col1:
+            st.subheader("Volume: Jobs Completed by Technician")
+            # Only count actual completed/invoiced work types
+            completed_jobs = valid_jobs[valid_jobs['Status'] == 'Completed']
+            tech_volume = completed_jobs['Assigned Team Members'].value_counts().reset_index()
+            tech_volume.columns = ['Technician', 'Jobs Completed']
             
-            # A. Feedback Trends over time
-            with col1:
-                st.subheader("Feedback Trends Over Time")
-                trend_data = feedback_df.groupby(feedback_df['Start Date'].dt.to_period("M"))['Feedback Score'].mean().reset_index()
-                trend_data['Start Date'] = trend_data['Start Date'].dt.to_timestamp()
-                
-                fig_trend = px.line(trend_data, x='Start Date', y='Feedback Score', 
-                                    markers=True, title="Average Feedback Score (Monthly)")
-                st.plotly_chart(fig_trend, use_container_width=True)
-                
-            # B. Technician Scorecards
-            with col2:
-                st.subheader("Technician Scorecards")
-                tech_scores = feedback_df.groupby('Assigned Team Members')['Feedback Score'].mean().reset_index().sort_values('Feedback Score', ascending=False)
-                
-                fig_tech = px.bar(tech_scores, x='Assigned Team Members', y='Feedback Score',
-                                  color='Feedback Score', color_continuous_scale='Viridis',
-                                  title="Average Score by Technician")
-                st.plotly_chart(fig_tech, use_container_width=True)
-                
-            # C. Install Type Quality
-            st.subheader("Quality by Install Type (Job Title)")
-            type_scores = feedback_df.groupby('Title')['Feedback Score'].mean().reset_index().sort_values('Feedback Score', ascending=False)
-            top_titles = feedback_df['Title'].value_counts().nlargest(15).index
-            type_scores = type_scores[type_scores['Title'].isin(top_titles)]
+            fig_vol = px.bar(tech_volume, x='Technician', y='Jobs Completed',
+                             color='Jobs Completed', color_continuous_scale='Blues',
+                             title="Total Completed Jobs per Technician")
+            st.plotly_chart(fig_vol, use_container_width=True)
             
-            fig_type = px.bar(type_scores, x='Title', y='Feedback Score',
-                              title="Average Feedback by Job Type (Top 15 Volume)",
-                              text_auto='.2f')
-            fig_type.update_layout(xaxis_tickangle=-45)
-            st.plotly_chart(fig_type, use_container_width=True)
-        else:
-            st.warning("No feedback score data available in the uploaded file to display.")
+        # B. Average Job Speed by Tech
+        with col2:
+            st.subheader("Efficiency: Avg Job Duration (Hours)")
+            tech_speed = completed_jobs.groupby('Assigned Team Members')['Job Duration Decimal'].mean().reset_index().sort_values('Job Duration Decimal')
+            tech_speed.columns = ['Technician', 'Avg Duration (Hours)']
+            
+            fig_speed = px.bar(tech_speed, x='Technician', y='Avg Duration (Hours)',
+                               color='Avg Duration (Hours)', color_continuous_scale='Turbo',
+                               title="Average Hours Spent per Job (Lower = Faster Swap Outs)")
+            st.plotly_chart(fig_speed, use_container_width=True)
+            
+        # C. Install Type Breakdown
+        st.write("---")
+        st.subheader("Job Type Mix & Revenue Generation")
+        
+        job_mix = completed_jobs.groupby('Title').agg(
+            Job_Count=('Title', 'count'),
+            Avg_Revenue=('Total Invoice Amount', 'mean')
+        ).reset_index().sort_values('Job_Count', ascending=False).head(15)
+        
+        fig_mix = px.bar(job_mix, x='Title', y='Job_Count',
+                         color='Avg_Revenue', color_continuous_scale='Viridis',
+                         labels={'Job_Count': 'Number of Installs', 'Avg_Revenue': 'Avg Revenue ($)'},
+                         title="Top 15 Job Types by Volume (Color Shows Avg Revenue per Job)",
+                         text_auto=True)
+        fig_mix.update_layout(xaxis_tickangle=-45)
+        st.plotly_chart(fig_mix, use_container_width=True)
 
     # ---------------------------------------------------------
     # TAB 2: Geographic & Territory Performance
@@ -124,7 +130,7 @@ if jobs_df is not None and invoices_df is not None:
                     
                     fig_profit = px.bar(profit_by_zip, x='Zip Code', y='Profit Margin',
                                         color='Profit Margin', color_continuous_scale='Greens',
-                                        title="Total Profit Margin by Zip Code")
+                                        title="Total Net Profit Margin by Zip Code")
                     fig_profit.update_xaxes(type='category')
                     st.plotly_chart(fig_profit, use_container_width=True)
                 else:
@@ -140,7 +146,7 @@ if jobs_df is not None and invoices_df is not None:
                         Job_Count=('Total Invoice Amount', 'count')
                     ).reset_index()
                     
-                    travel_waste = travel_waste[travel_waste['Job_Count'] >= 3]
+                    travel_waste = travel_waste[travel_waste['Job_Count'] >= 2]
                     
                     fig_waste = px.scatter(travel_waste, x='Avg_Travel', y='Avg_Invoice', 
                                            size='Job_Count', color='Zip Code', hover_name='Zip Code',
@@ -159,6 +165,4 @@ if jobs_df is not None and invoices_df is not None:
 else:
     # Landing page message when no files are uploaded yet
     st.info("👋 Welcome! Please upload **both** CSV files in the sidebar to populate the dashboard analytics.")
-    
-    # Optional styling for an empty state
     st.image("https://images.unsplash.com/photo-1551288049-bebda4e38f71?auto=format&fit=crop&w=600&q=80", width=500)
