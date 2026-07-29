@@ -60,7 +60,7 @@ def calculate_job_labor_cost(row):
         return 0.0
 
 # ---------------------------------------------------------
-# MATERIAL COST CALCULATION ENGINE (NEW CONTRACTOR RULES)
+# MATERIAL COST CALCULATION ENGINE
 # ---------------------------------------------------------
 def calculate_job_material_cost(row):
     tech = str(row['Assigned Team Members']).lower()
@@ -190,9 +190,9 @@ if raw_jobs_df is not None and invoices_df is not None:
     # ---------------------------------------------------------
     with tab2:
         st.header("Financial Performance & Labor Cost Analysis")
-        st.write("Tracks labor cost adjustments and vendor margins compared against operational profit pools.")
         
         if not completed_jobs.empty:
+            st.subheader("📊 Aggregate Team Efficiency")
             fin_metrics = completed_jobs.groupby('Assigned Team Members').agg(
                 Jobs_Completed=('Status', 'count'),
                 Total_Revenue=('Total Invoice Amount', 'sum'),
@@ -220,6 +220,44 @@ if raw_jobs_df is not None and invoices_df is not None:
                 hide_index=True
             )
             
+            st.write("---")
+            
+            # ---------------------------------------------------------
+            # ADDED SUB-TABLE: CONTRACTOR PROFIT/LOSS AUDIT
+            # ---------------------------------------------------------
+            st.subheader("🏗️ Contractor Profit & Loss Audit (Job-by-Job)")
+            st.write("This log tracks contractor tickets to isolate unlucrative operations (e.g., Simple Installs yielding $0 net business margin).")
+            
+            # Define keywords matching contractors
+            contractor_keywords = ['contractor', 'contactor', 'llc', 'ken', 'barber', 'wrench', 'wrentch', 'presidio', 'indian']
+            
+            # Filter rows where the technician matches contractor indicators
+            is_contractor_mask = completed_jobs['Assigned Team Members'].astype(str).str.lower().apply(
+                lambda x: any(k in x for k in contractor_keywords)
+            )
+            contractor_df = completed_jobs[is_contractor_mask].copy()
+            
+            if not contractor_df.empty:
+                # Select key operational columns for auditing leakages
+                contractor_audit = contractor_df[['#ID', 'Assigned Team Members', 'Business Unit', 'Total Invoice Amount', 'Material Cost', 'Labor Cost', 'Net Gross Profit']].copy()
+                contractor_audit = contractor_audit.sort_values(by='Net Gross Profit', ascending=True)
+                
+                contractor_audit.columns = ['Job #', 'Contractor', 'Business Unit', 'Gross Revenue', 'Material Cost', 'Contractor Payout', 'Net Profit / Loss']
+                
+                # Render table with highlighting on the final net earnings column
+                st.dataframe(
+                    contractor_audit.style.format({
+                        'Gross Revenue': '${:,.2f}',
+                        'Material Cost': '${:,.2f}',
+                        'Contractor Payout': '${:,.2f}',
+                        'Net Profit / Loss': '${:,.2f}'
+                    }).background_gradient(subset=['Net Profit / Loss'], cmap='RdYlGn', vmin=-100, vmax=500),
+                    use_container_width=True,
+                    hide_index=True
+                )
+            else:
+                st.info("No contractor assignments matched in the currently uploaded data range.")
+                
             st.info("💡 **Ops Management Insight:** *Labor % of (Rev - Mats)* displays exactly what percentage of your job margin is consumed by labor after paying for equipment/supplies. This accurately captures true labor efficiency independent of material price fluctuations.")
         else:
             st.warning("No completed financial data available to build margins.")
