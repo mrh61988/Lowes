@@ -61,7 +61,7 @@ def load_regional_geojson_boundaries():
     """Streams minified geometric boundary vectors for localized Arizona postal code grids."""
     url = "https://raw.githubusercontent.com/OpenDataDE/State-zip-code-GeoJSON/master/az_arizona_zip_codes_geo.min.json"
     try:
-        req = urllib.request.Request(url, headers={'User-Agent': 'OpsCode_GeoEngine/11.0'})
+        req = urllib.request.Request(url, headers={'User-Agent': 'OpsCode_GeoEngine/12.0'})
         with urllib.request.urlopen(req, timeout=12) as response:
             return json.loads(response.read().decode())
     except Exception:
@@ -81,7 +81,7 @@ def geocode_address_string(address_str):
     encoded_query = urllib.parse.quote(query_string)
     url = f"https://nominatim.openstreetmap.org/search?q={encoded_query}&format=json&limit=1"
     try:
-        req = urllib.request.Request(url, headers={'User-Agent': 'OpsManagerDashboard_Geomap/11.0'})
+        req = urllib.request.Request(url, headers={'User-Agent': 'OpsManagerDashboard_Geomap/12.0'})
         with urllib.request.urlopen(req, timeout=4) as response:
             data = json.loads(response.read().decode())
             if data:
@@ -301,34 +301,142 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
     jobs_df['Material Cost'] = jobs_df.apply(calculate_job_material_cost, axis=1)
     jobs_df['Net Gross Profit'] = jobs_df['Total Invoice Amount'] - jobs_df['Material Cost'] - jobs_df['Labor Cost']
 
-    # ALL METRICS AND TABLES RENDER AND RESPOND IMMEDIATELY BEFORE SPATIAL PARSING STEPS RUN
     tab1, tab2, tab3 = st.tabs(["Technician & Job Metrics", "Financial & Labor ROI", "Geographic Performance"])
 
+    # ---------------------------------------------------------
+    # TAB 1: RESTORED & CLEANLY FORMATTED PRODUCTIVITY SUITE
+    # ---------------------------------------------------------
     with tab1:
         st.header("Technician Productivity & Job Performance")
         completed_jobs = jobs_df[jobs_df['Status'] == 'Completed'].copy()
+        
         if not completed_jobs.empty:
             tech_metrics = completed_jobs.groupby('Assigned Team Members').agg(
-                Total_Jobs_Completed=('Status', 'count'), Avg_Duration_Hours=('Custom Ticket Hours', 'mean'),
-                Total_Revenue_Generated=('Total Invoice Amount', 'sum'), Avg_Revenue_Per_Job=('Total Invoice Amount', 'mean')
+                Total_Jobs_Completed=('Status', 'count'),
+                Avg_Duration_Hours=('Custom Ticket Hours', 'mean'),
+                Total_Revenue_Generated=('Total Invoice Amount', 'sum'),
+                Avg_Revenue_Per_Job=('Total Invoice Amount', 'mean')
             ).reset_index().sort_values('Total_Jobs_Completed', ascending=False)
             
+            # Formatting floats cleanly before render layers to mirror high-end report cards
             tech_metrics['Total_Revenue_Generated'] = tech_metrics['Total_Revenue_Generated'].astype(float)
-            st.dataframe(tech_metrics.style.format({'Total_Revenue_Generated': '${:,.2f}'}), use_container_width=True, hide_index=True)
+            tech_metrics['Avg_Revenue_Per_Job'] = tech_metrics['Avg_Revenue_Per_Job'].astype(float)
+            tech_metrics['Avg_Duration_Hours'] = tech_metrics['Avg_Duration_Hours'].map(format_hours_mins)
 
+            # Human-readable label remapping
+            tech_metrics_renamed = tech_metrics.rename(columns={
+                'Assigned Team Members': 'Assigned Team Members',
+                'Total_Jobs_Completed': 'Total Jobs Completed',
+                'Avg_Duration_Hours': 'Avg Job Duration (H:MM)',
+                'Total_Revenue_Generated': 'Total Revenue Generated',
+                'Avg_Revenue_Per_Job': 'Avg Revenue Per Job'
+            })
+            
+            st.dataframe(
+                tech_metrics_renamed.style.format({
+                    'Total Revenue Generated': '${:,.2f}',
+                    'Avg Revenue Per Job': '${:,.2f}'
+                }), 
+                use_container_width=True, 
+                hide_index=True
+            )
+
+            st.markdown("---")
+            st.subheader("⏱️ Restored Labor Hours & Timesheet Variance Audit")
+            st.write("Cross-references field ticket records directly against clocked system timesheet inputs to highlight operational discrepancies.")
+
+            # Compute actual clocked logs vs parsed inside-ticket durations
+            ts_summary = timesheets_df.groupby('User')['Duration Decimal'].sum().reset_index()
+            ticket_summary = completed_jobs.groupby('Assigned Team Members')['Custom Ticket Hours'].sum().reset_index()
+
+            audit_df = pd.merge(ticket_summary, ts_summary, left_on='Assigned Team Members', right_on='User', how='outer').fillna(0.0)
+            audit_df['User'] = np.where(audit_df['User'] == 0.0, audit_df['Assigned Team Members'], audit_df['User'])
+            audit_df = audit_df[audit_df['User'] != 'Unassigned']
+
+            audit_df['Variance Hours'] = audit_df['Duration Decimal'] - audit_df['Custom Ticket Hours']
+            audit_df['Utilization %'] = np.where(
+                audit_df['Duration Decimal'] > 0, 
+                (audit_df['Custom Ticket Hours'] / audit_df['Duration Decimal']) * 100, 
+                0.0
+            )
+
+            # Convert to duration format strings
+            audit_df['Active Ticket Hours'] = audit_df['Custom Ticket Hours'].map(format_hours_mins)
+            audit_df['Clocked Timesheet Hours'] = audit_df['Duration Decimal'].map(format_hours_mins)
+            audit_df['Variance/Travel Hours'] = audit_df['Variance Hours'].map(format_hours_mins)
+
+            audit_render = audit_df[['User', 'Clocked Timesheet Hours', 'Active Ticket Hours', 'Variance/Travel Hours', 'Utilization %']].copy()
+            audit_render.columns = ['Technician / Contractor Name', 'Clocked Timesheet Hours', 'Active Ticket Hours', 'Variance or Travel Hours', 'Labor Utilization Efficiency']
+            
+            st.dataframe(
+                audit_render.style.format({'Labor Utilization Efficiency': '{:.1f}%'}),
+                use_container_width=True,
+                hide_index=True
+            )
+
+    # ---------------------------------------------------------
+    # TAB 2: RESTORED & CLEANLY FORMATTED COST ROBUSTNESS SUITE
+    # ---------------------------------------------------------
     with tab2:
         st.header("Financial Performance & Labor Cost Analysis")
         if not completed_jobs.empty:
             fin_metrics = completed_jobs.groupby('Assigned Team Members').agg(
-                Jobs_Completed=('Status', 'count'), Total_Revenue=('Total Invoice Amount', 'sum'),
-                Total_Material_Cost=('Material Cost', 'sum'), Total_Labor_Cost_Jobs=('Labor Cost', 'sum')
-            ).reset_index()
+                Jobs_Completed=('Status', 'count'),
+                Total_Revenue=('Total Invoice Amount', 'sum'),
+                Total_Material_Cost=('Material Cost', 'sum'),
+                Total_Labor_Cost_Jobs=('Labor Cost', 'sum'),
+                Net_Profit=('Net Gross Profit', 'sum')
+            ).reset_index().sort_values('Net_Profit', ascending=False)
             
-            fin_metrics['Total_Revenue'] = fin_metrics['Total_Revenue'].astype(float)
-            st.dataframe(fin_metrics.style.format({'Total_Revenue': '${:,.2f}'}), use_container_width=True, hide_index=True)
+            # Re-securing absolute data primitives for style targets
+            for c in ['Total_Revenue', 'Total_Material_Cost', 'Total_Labor_Cost_Jobs', 'Net_Profit']:
+                fin_metrics[c] = fin_metrics[c].astype(float)
+
+            fin_metrics_renamed = fin_metrics.rename(columns={
+                'Assigned Team Members': 'Assigned Team Members',
+                'Jobs_Completed': 'Jobs Completed',
+                'Total_Revenue': 'Total Gross Revenue',
+                'Total_Material_Cost': 'Total Material Cost',
+                'Total_Labor_Cost_Jobs': 'Attributed Labor Cost',
+                'Net_Profit': 'Net Gross Profit'
+            })
+            
+            st.dataframe(
+                fin_metrics_renamed.style.format({
+                    'Total Gross Revenue': '${:,.2f}',
+                    'Total Material Cost': '${:,.2f}',
+                    'Attributed Labor Cost': '${:,.2f}',
+                    'Net Gross Profit': '${:,.2f}'
+                }), 
+                use_container_width=True, 
+                hide_index=True
+            )
+
+            st.markdown("---")
+            st.subheader("📊 Restored Margin Breakdown & Yield Analysis")
+            st.write("Identifies high-performing resource classifications by examining the true gross margins of the business units.")
+
+            fin_metrics['Gross Margin %'] = np.where(
+                fin_metrics['Total_Revenue'] > 0,
+                (fin_metrics['Net_Profit'] / fin_metrics['Total_Revenue']) * 100,
+                0.0
+            )
+
+            margin_render = fin_metrics[['Assigned Team Members', 'Jobs_Completed', 'Total_Revenue', 'Net_Profit', 'Gross Margin %']].copy()
+            margin_render.columns = ['Resource Designation', 'Volume Managed', 'Gross Intake Billed', 'Net Field Returns', 'Gross Operating Margin']
+            
+            st.dataframe(
+                margin_render.style.format({
+                    'Gross Intake Billed': '${:,.2f}',
+                    'Net Field Returns': '${:,.2f}',
+                    'Gross Operating Margin': '{:.1f}%'
+                }),
+                use_container_width=True,
+                hide_index=True
+            )
 
     # ---------------------------------------------------------
-    # TAB 3: GEOGRAPHIC PERFORMANCE (STABILIZED VISUAL DISTRIBUTION ARCHITECTURE)
+    # TAB 3: GEOGRAPHIC PERFORMANCE (STABILIZED SPATIAL DISTRIBUTION)
     # ---------------------------------------------------------
     with tab3:
         st.header("Geographic Profitability & Travel Time Analysis")
@@ -351,8 +459,6 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
             
             geojson_data = load_regional_geojson_boundaries()
             
-            # STAGE 1: DYNAMIC GEO-CENTROID REGISTRY GENERATION
-            # Scans the loaded boundary shapes to map out centers for all Arizona zip codes instantly
             dynamic_zip_lookup = {}
             if geojson_data:
                 for feature in geojson_data.get('features', []):
@@ -391,7 +497,6 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
                                 return coords[0], coords[1]
                     
                     z_code = str(row.get('Zip Code', '')).strip()
-                    # Query newly built dynamic registry first to guarantee data retention
                     if z_code in dynamic_zip_lookup:
                         return dynamic_zip_lookup[z_code]
                     if z_code in AZ_ZIP_COORDINATES:
@@ -404,16 +509,12 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
             
             map_clean_df = geo_df.dropna(subset=['latitude', 'longitude']).copy()
             
-            # STAGE 2: DETERMINISTIC SPATIAL JITTERING ENGINE
-            # Scatters stacked coordinate points slightly to clearly show separate overlapping jobs
             if not map_clean_df.empty:
-                np.random.seed(42)  # Seeds ensure coordinates remain stable across map updates
+                np.random.seed(42)
                 if not enable_street_precision:
-                    # Distribute points cleanly within boundaries if using zip centers
                     map_clean_df['latitude'] += np.random.uniform(-0.007, 0.007, size=len(map_clean_df))
                     map_clean_df['longitude'] += np.random.uniform(-0.007, 0.007, size=len(map_clean_df))
                 else:
-                    # Apply tighter separation jitter to multi-unit buildings or stacked results
                     dupes = map_clean_df.duplicated(subset=['latitude', 'longitude'], keep=False)
                     if dupes.any():
                         map_clean_df.loc[dupes, 'latitude'] += np.random.uniform(-0.0008, 0.0008, size=dupes.sum())
