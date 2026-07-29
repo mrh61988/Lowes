@@ -20,6 +20,36 @@ def format_hours_mins(decimal_hours):
     return f"{hours}:{minutes:02d}"
 
 # ---------------------------------------------------------
+# LABOUR COST CALCULATION ENGINE
+# ---------------------------------------------------------
+def calculate_job_labor_cost(row):
+    tech = row['Assigned Team Members']
+    duration = row['Job Duration Decimal']
+    revenue = row['Total Invoice Amount']
+    
+    # Handle missing or invalid inputs gracefully
+    if pd.isna(duration): duration = 0.0
+    if pd.isna(revenue): revenue = 0.0
+    
+    # Salary Techs (Calculated at 2080 standard annual working hours)
+    if tech == 'Sean Marble':
+        return duration * (70000 / 2080)
+    elif tech == 'Mathew Hodges':
+        return duration * (65000 / 2080)
+        
+    # Hourly Techs ($25/hr)
+    elif tech in ['Matt Schlosser', 'Tanner LaForge', 'Edward Lopez']:
+        return duration * 25.00
+        
+    # Commission Techs (34% of Job Revenue)
+    elif tech in ['Erik Tange', 'Bryan Pickett']:
+        return revenue * 0.34
+        
+    # Default fallback for unconfigured contractors or undefined personnel
+    else:
+        return 0.0
+
+# ---------------------------------------------------------
 # 1. SIDEBAR FILE UPLOADS
 # ---------------------------------------------------------
 st.sidebar.header("📁 Upload Operational Data")
@@ -50,7 +80,6 @@ if raw_jobs_df is not None and invoices_df is not None:
     
     # --- STAGE 1: FILTER BY BUSINESS UNIT ---
     if 'Business Unit' in raw_jobs_df.columns:
-        # Filter for only Water Heaters and Simple Installs rows
         jobs_df = raw_jobs_df[
             raw_jobs_df['Business Unit'].str.contains('Water Heaters|Simple Installs', case=False, na=False)
         ].copy()
@@ -60,42 +89,42 @@ if raw_jobs_df is not None and invoices_df is not None:
 
     # --- STAGE 2: ATTRIBUTE MULTI-TECH JOBS TO FIRST NAMED TECH ---
     if 'Assigned Team Members' in jobs_df.columns:
-        # Using native vectorized string operations to prevent backend/Arrow type errors
         jobs_df['Assigned Team Members'] = jobs_df['Assigned Team Members'].astype(str).str.split(',').str[0].str.strip()
-        # Clean up any leftover string variations of empty fields
         jobs_df['Assigned Team Members'] = jobs_df['Assigned Team Members'].replace(['nan', 'None', ''], None)
 
     # --- Clean numeric & date columns for Jobs ---
-    numeric_cols_jobs = ['Total Invoice Amount', 'Job Duration Decimal', 'Travel Duration Decimal']
+    numeric_cols_jobs = ['Total Invoice Amount', 'Job Duration Decimal', 'Travel Duration Decimal', 
+                         'Invoice - Total Product Cost', 'Invoice - Total Service Cost']
     for col in numeric_cols_jobs:
         if col in jobs_df.columns:
-            jobs_df[col] = pd.to_numeric(jobs_df[col], errors='coerce')
+            jobs_df[col] = pd.to_numeric(jobs_df[col], errors='coerce').fillna(0.0)
             
     if 'Start Date' in jobs_df.columns:
         jobs_df['Start Date'] = pd.to_datetime(jobs_df['Start Date'], errors='coerce')
 
     # --- Clean numeric columns for Invoices ---
     if 'Profit Margin' in invoices_df.columns:
-        invoices_df['Profit Margin'] = pd.to_numeric(invoices_df['Profit Margin'], errors='coerce')
+        invoices_df['Profit Margin'] = pd.to_numeric(invoices_df['Profit Margin'], errors='coerce').fillna(0.0)
+
+    # --- STAGE 3: APPLY PAY STRUCTURE CALCULATIONS ---
+    jobs_df['Labor Cost'] = jobs_df.apply(calculate_job_labor_cost, axis=1)
+    jobs_df['Material Cost'] = jobs_df['Invoice - Total Product Cost'] + jobs_df['Invoice - Total Service Cost']
+    jobs_df['Net Gross Profit'] = jobs_df['Total Invoice Amount'] - jobs_df['Material Cost'] - jobs_df['Labor Cost']
 
     # Create tabs for the different modules
-    tab1, tab2 = st.tabs(["Technician & Job Metrics", "Geographic & Territory Performance"])
+    tab1, tab2, tab3 = st.tabs(["Technician & Job Metrics", "Financial & Labor ROI", "Geographic Performance"])
 
     # ---------------------------------------------------------
-    # TAB 1: Technician & Job Metrics (Tables Only)
+    # TAB 1: Technician & Job Metrics
     # ---------------------------------------------------------
     with tab1:
         st.header("Technician Productivity & Job Performance")
-        
-        # Only analyze completed work types
         completed_jobs = jobs_df[jobs_df['Status'] == 'Completed'].dropna(subset=['Assigned Team Members']).copy()
         
         if not completed_jobs.empty:
             col1, col2 = st.columns(2)
-            
             with col1:
-                st.subheader("📋 Completed Jobs & Speed by Technician")
-                # Group metrics per technician
+                st.subheader("📋 Volume & Speed by Technician")
                 tech_metrics = completed_jobs.groupby('Assigned Team Members').agg(
                     Total_Jobs_Completed=('Status', 'count'),
                     Avg_Duration_Hours=('Job Duration Decimal', 'mean'),
@@ -103,21 +132,13 @@ if raw_jobs_df is not None and invoices_df is not None:
                     Avg_Revenue_Per_Job=('Total Invoice Amount', 'mean')
                 ).reset_index().sort_values('Total_Jobs_Completed', ascending=False)
                 
-                # Format for clean viewing
                 tech_metrics.columns = ['Technician Name', 'Jobs Completed', 'Avg Job Time (H:MM)', 'Total Revenue', 'Avg Revenue/Job']
-                st.dataframe(
-                    tech_metrics.style.format({
-                        'Avg Job Time (H:MM)': format_hours_mins, 
-                        'Total Revenue': '${:,.2f}', 
-                        'Avg Revenue/Job': '${:,.2f}'
-                    }), 
-                    use_container_width=True,
-                    hide_index=True
-                )
+                st.dataframe(tech_metrics.style.format({
+                    'Avg Job Time (H:MM)': format_hours_mins, 'Total Revenue': '${:,.2f}', 'Avg Revenue/Job': '${:,.2f}'
+                }), use_container_width=True, hide_index=True)
                 
             with col2:
                 st.subheader("🔧 Performance Breakdown by Job Type")
-                # Group metrics per specific job title
                 job_mix = completed_jobs.groupby('Title').agg(
                     Job_Count=('Title', 'count'),
                     Avg_Duration_Hours=('Job Duration Decimal', 'mean'),
@@ -126,34 +147,63 @@ if raw_jobs_df is not None and invoices_df is not None:
                 ).reset_index().sort_values('Job_Count', ascending=False)
                 
                 job_mix.columns = ['Job Title / Type', 'Volume Done', 'Avg Time Spent (H:MM)', 'Avg Ticket Size', 'Total Revenue']
-                st.dataframe(
-                    job_mix.style.format({
-                        'Avg Time Spent (H:MM)': format_hours_mins, 
-                        'Avg Ticket Size': '${:,.2f}', 
-                        'Total Revenue': '${:,.2f}'
-                    }),
-                    use_container_width=True,
-                    hide_index=True
-                )
+                st.dataframe(job_mix.style.format({
+                    'Avg Time Spent (H:MM)': format_hours_mins, 'Avg Ticket Size': '${:,.2f}', 'Total Revenue': '${:,.2f}'
+                }), use_container_width=True, hide_index=True)
         else:
-            st.warning("No 'Completed' status jobs found for Water Heaters or Simple Installs.")
+            st.warning("No 'Completed' status jobs found.")
 
     # ---------------------------------------------------------
-    # TAB 2: Geographic & Territory Performance (Tables Only)
+    # TAB 2: NEW Financial & Labor ROI Metrics
     # ---------------------------------------------------------
     with tab2:
-        st.header("Geographic Profitability & Travel Time Analysis")
+        st.header("Financial Performance & Labor Cost Analysis")
+        st.write("This table compares total revenue generation against true loaded labor burdens and material overhead costs.")
         
-        # Enforce consistent string casting to protect merge step from mixed-type Arrow errors
+        if not completed_jobs.empty:
+            # Group financial metrics by Technician
+            fin_metrics = completed_jobs.groupby('Assigned Team Members').agg(
+                Jobs_Completed=('Status', 'count'),
+                Total_Revenue=('Total Invoice Amount', 'sum'),
+                Total_Material_Cost=('Material Cost', 'sum'),
+                Total_Labor_Cost=('Labor Cost', 'sum'),
+                Total_Net_Profit=('Net Gross Profit', 'sum')
+            ).reset_index().sort_values('Total_Net_Profit', ascending=False)
+            
+            # Calculate the True Labor Percentage metric
+            fin_metrics['Labor % of Rev'] = (fin_metrics['Total_Labor_Cost'] / fin_metrics['Total_Revenue']) * 100
+            fin_metrics['Labor % of Rev'] = fin_metrics['Labor % of Rev'].fillna(0.0)
+            
+            fin_metrics.columns = ['Technician Name', 'Jobs Done', 'Gross Revenue', 'Material Costs', 'Labor Cost Burden', 'Net Gross Profit', 'Labor % of Revenue']
+            
+            st.dataframe(
+                fin_metrics.style.format({
+                    'Gross Revenue': '${:,.2f}',
+                    'Material Costs': '${:,.2f}',
+                    'Labor Cost Burden': '${:,.2f}',
+                    'Net Gross Profit': '${:,.2f}',
+                    'Labor % of Revenue': '{:.1f}%'
+                }),
+                use_container_width=True,
+                hide_index=True
+            )
+            
+            st.info("💡 **Ops Management Insight:** Hourly and salaried installation technicians usually yield a significantly lower *Labor % of Revenue* compared to the fixed 34% commission tier when volume and execution speeds remain high.")
+        else:
+            st.warning("No completed financial data available to build margins.")
+
+    # ---------------------------------------------------------
+    # TAB 3: Geographic Performance
+    # ---------------------------------------------------------
+    with tab3:
+        st.header("Geographic Profitability & Travel Time Analysis")
         if 'Related Invoices' in jobs_df.columns and '#ID' in invoices_df.columns:
             jobs_df['Related Invoices'] = jobs_df['Related Invoices'].astype(str).str.split('.').str[0].str.strip()
             invoices_df['#ID'] = invoices_df['#ID'].astype(str).str.split('.').str[0].str.strip()
-            
             geo_df = pd.merge(jobs_df, invoices_df, left_on='Related Invoices', right_on='#ID', how='inner')
         else:
             geo_df = jobs_df.copy()
 
-        # Drop rows where team member extraction left clean null results
         if 'Assigned Team Members' in geo_df.columns:
             geo_df = geo_df.dropna(subset=['Assigned Team Members'])
 
@@ -162,7 +212,6 @@ if raw_jobs_df is not None and invoices_df is not None:
             geo_df = geo_df[(geo_df['Zip Code'] != 'nan') & (geo_df['Zip Code'] != '')]
             
             col3, col4 = st.columns(2)
-            
             with col3:
                 st.subheader("💰 Most Lucrative Zip Codes (Net Profit)")
                 if 'Profit Margin' in geo_df.columns:
@@ -173,19 +222,14 @@ if raw_jobs_df is not None and invoices_df is not None:
                     ).reset_index().sort_values('Total_Net_Profit', ascending=False)
                     
                     profit_by_zip.columns = ['Zip Code', 'Total Jobs', 'Total Net Profit', 'Avg Profit/Job']
-                    st.dataframe(
-                        profit_by_zip.style.format({
-                            'Total Net Profit': '${:,.2f}', 
-                            'Avg Profit/Job': '${:,.2f}'
-                        }), 
-                        use_container_width=True,
-                        hide_index=True
-                    )
+                    st.dataframe(profit_by_zip.style.format({
+                        'Total Net Profit': '${:,.2f}', 'Avg Profit/Job': '${:,.2f}'
+                    }), use_container_width=True, hide_index=True)
                 else:
-                    st.info("Profit Margin data missing or unable to match invoice records.")
+                    st.info("Profit Margin details missing.")
 
             with col4:
-                st.subheader("🚗 Travel Efficiency & Revenue Leakage by Zone")
+                st.subheader("🚗 Travel Efficiency by Zone")
                 if 'Travel Duration Decimal' in geo_df.columns and 'Total Invoice Amount' in geo_df.columns:
                     travel_waste = geo_df.groupby('Zip Code').agg(
                         Job_Count=('Zip Code', 'count'),
@@ -194,19 +238,10 @@ if raw_jobs_df is not None and invoices_df is not None:
                     ).reset_index().sort_values('Avg_Travel_Hours', ascending=False)
                     
                     travel_waste.columns = ['Zip Code', 'Total Jobs', 'Avg Drive Time (H:MM)', 'Avg Ticket Size']
-                    st.dataframe(
-                        travel_waste.style.format({
-                            'Avg Drive Time (H:MM)': format_hours_mins, 
-                            'Avg Ticket Size': '${:,.2f}'
-                        }), 
-                        use_container_width=True,
-                        hide_index=True
-                    )
-                else:
-                    st.info("Travel duration or Invoice Amount metrics are missing in the data.")
+                    st.dataframe(travel_waste.style.format({
+                        'Avg Drive Time (H:MM)': format_hours_mins, 'Avg Ticket Size': '${:,.2f}'
+                    }), use_container_width=True, hide_index=True)
         else:
-            st.warning("No Zip Code field populated in the uploaded source files.")
-
+            st.warning("No Zip Code field populated in source data.")
 else:
-    # Landing page state when files aren't uploaded yet
     st.info("👋 Welcome! Please upload **both** operational CSV exports in the sidebar to build your data tables.")
