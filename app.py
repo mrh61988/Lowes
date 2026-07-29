@@ -60,7 +60,6 @@ bryan_matrix_df = None
 
 if download_error:
     st.sidebar.error(f"❌ Cloud Sync Failed: {download_error}")
-    st.sidebar.warning("Please verify that both Google Sheets are set to 'Anyone with the link can view'.")
 else:
     st.sidebar.success("⚡ Live Pricing Matrices Synced")
     
@@ -68,11 +67,9 @@ else:
     if "bryan" in content_dump_1 or "pickett" in content_dump_1:
         bryan_matrix_df = df_sheet_1
         erik_matrix_df = df_sheet_2
-        st.sidebar.info("Detected Matrix Layout: Sheet 1 (Bryan) | Sheet 2 (Erik)")
     else:
         erik_matrix_df = df_sheet_1
         bryan_matrix_df = df_sheet_2
-        st.sidebar.info("Detected Matrix Layout: Sheet 1 (Erik) | Sheet 2 (Bryan)")
 
 # -----------------------------------------------------------------------------
 # 3. ADVANCED MULTI-ITEM & QUANTITY PRICING ENGINE
@@ -80,8 +77,7 @@ else:
 def lookup_matrix_rate(row, tech_name, current_revenue, erik_mat, bryan_mat, mode="labor"):
     """
     Scans the job title for item order and maps them sequentially to slash 
-    notation quantities in the subtitle. If the subtitle is empty, it assumes 
-    a default quantity of 1 for each detected item.
+    notation quantities in the subtitle.
     """
     job_title = str(row.get('Title', '')).lower()
     
@@ -108,7 +104,12 @@ def lookup_matrix_rate(row, tech_name, current_revenue, erik_mat, bryan_mat, mod
             root_keyword = keyword[:-1] if keyword.endswith('s') else keyword
             idx = job_title.find(root_keyword)
             if idx != -1:
-                rate = float(m_row[payout_col]) if mode == "labor" else float(m_row[inv_col])
+                try:
+                    # Sanitize internal matrix numeric cells just in case they have $ signs
+                    raw_rate = str(m_row[payout_col] if mode == "labor" else m_row[inv_col])
+                    rate = float(re.sub(r'[^\d.]', '', raw_rate))
+                except:
+                    rate = 0.0
                 found_keywords.append({
                     'index': idx, 'keyword': keyword, 'root': root_keyword, 'rate': rate
                 })
@@ -150,6 +151,11 @@ uploaded_jobs = st.sidebar.file_uploader("Upload Jobs Full Data CSV", type=["csv
 uploaded_invoices = st.sidebar.file_uploader("Upload Invoices CSV", type=["csv"])
 uploaded_timesheets = st.sidebar.file_uploader("Upload Timesheets CSV", type=["csv"])
 
+# Helper tool to scrub currency symbols out of text
+def sanitize_currency_series(series):
+    cleaned = series.astype(str).str.replace(r'[^\d.-]', '', regex=True)
+    return pd.to_numeric(cleaned, errors='coerce').fillna(0.0)
+
 # -----------------------------------------------------------------------------
 # 5. DATA PROCESSING & INGESTION RECONCILIATION
 # -----------------------------------------------------------------------------
@@ -164,33 +170,36 @@ if uploaded_jobs and uploaded_invoices and uploaded_timesheets:
     df_invoices.columns = [c.strip() for c in df_invoices.columns]
     df_timesheets.columns = [c.strip() for c in df_timesheets.columns]
     
-    # --- ANTI-CRASH COLUMN MAPPING ENGINE ---
-    # 1. Normalize Revenue/Billed Column
-    rev_col = next((c for c in df_jobs.columns if c.lower() in ['revenue', 'invoice total', 'amount', 'total', 'gross revenue', 'price']), None)
-    df_jobs['Revenue'] = pd.to_numeric(df_jobs[rev_col], errors='coerce').fillna(0.0) if rev_col else 0.0
+    # --- WILDCARD AUTO-DETECTION ENGINE ---
+    def find_best_column(keys, columns, fallback_idx=0):
+        for idx, col in enumerate(columns):
+            if any(k in col.lower() for k in keys):
+                return idx
+        return fallback_idx
 
-    # 2. Normalize Technician Assignment Column
-    tech_col = next((c for c in df_jobs.columns if c.lower() in ['technician', 'lead tech', 'tech', 'employee']), None)
-    df_jobs['Technician'] = df_jobs[tech_col].fillna('Unknown Tech') if tech_col else 'Unknown Tech'
+    job_cols = list(df_jobs.columns)
 
-    # 3. Normalize Business Unit Category
-    bu_col = next((c for c in df_jobs.columns if c.lower() in ['business unit', 'department', 'bu', 'work stream']), None)
-    df_jobs['Business Unit'] = df_jobs[bu_col].fillna('General') if bu_col else 'General'
+    # Inject interactive user overrides inside the sidebar to handle column changes
+    st.sidebar.markdown("---")
+    with st.sidebar.expander("⚙️ Column Mapping Verification", expanded=True):
+        st.write("Ensure your spreadsheet headers match our selections below:")
         
-    # 4. Normalize Unique Job Identity
-    id_col = next((c for c in df_jobs.columns if c.lower() in ['job id', 'ticket number', 'ticket', 'job #', 'id']), None)
-    df_jobs['Job ID'] = df_jobs[id_col].astype(str) if id_col else df_jobs.index.astype(str)
+        chosen_rev = st.selectbox("Revenue / Invoiced Column", job_cols, index=find_best_column(['rev', 'tot', 'amt', 'pri', 'bill', 'inv'], job_cols))
+        chosen_tech = st.selectbox("Technician Column", job_cols, index=find_best_column(['tech', 'lead', 'emp', 'res', 'assign', 'work', 'name'], job_cols))
+        chosen_bu = st.selectbox("Business Unit Column", job_cols, index=find_best_column(['unit', 'dept', 'bu', 'stream', 'cat', 'type'], job_cols))
+        chosen_id = st.selectbox("Job ID Column", job_cols, index=find_best_column(['id', 'num', 'tick', 'job', '#'], job_cols))
+        chosen_mat = st.selectbox("Materials Cost Column", job_cols, index=find_best_column(['mat', 'part', 'sup', 'cost', 'exp'], job_cols, fallback_idx=0))
+        chosen_title = st.selectbox("Job Title Column", job_cols, index=find_best_column(['tit', 'sum', 'desc', 'name', 'job'], job_cols))
 
-    # 5. Normalize Material Cost Fields
-    mat_col = next((c for c in df_jobs.columns if c.lower() in ['materials', 'material costs', 'material cost', 'parts']), None)
-    df_jobs['Materials'] = pd.to_numeric(df_jobs[mat_col], errors='coerce').fillna(0.0) if mat_col else 0.0
-    
-    # 6. Normalize Job/Ticket Title
-    title_col = next((c for c in df_jobs.columns if c.lower() in ['title', 'job title', 'summary', 'work description']), None)
-    if title_col and title_col != 'Title':
-        df_jobs['Title'] = df_jobs[title_col]
+    # Apply choice maps & sanitize string numbers into clean floats
+    df_jobs['Revenue'] = sanitize_currency_series(df_jobs[chosen_rev])
+    df_jobs['Technician'] = df_jobs[chosen_tech].fillna('Unknown Tech').astype(str)
+    df_jobs['Business Unit'] = df_jobs[chosen_bu].fillna('General').astype(str)
+    df_jobs['Job ID'] = df_jobs[chosen_id].astype(str)
+    df_jobs['Materials'] = sanitize_currency_series(df_jobs[chosen_mat])
+    df_jobs['Title'] = df_jobs[chosen_title].fillna('').astype(str)
 
-    # Calendar Week Range Burdens Assessment
+    # Calculate dynamic weekly dates
     date_col = next((c for c in df_jobs.columns if 'date' in c.lower()), None)
     if date_col:
         df_jobs[date_col] = pd.to_datetime(df_jobs[date_col], errors='coerce')
@@ -206,6 +215,9 @@ if uploaded_jobs and uploaded_invoices and uploaded_timesheets:
         
     st.sidebar.info(f"📆 Date range spans **{detected_weeks} week(s)**. Scaling fixed salaries accordingly.")
 
+    # -----------------------------------------------------------------------------
+    # FINANCIAL ENGINE CALCULATIONS
+    # -----------------------------------------------------------------------------
     def calculate_job_metrics(row):
         tech = str(row['Technician']).strip()
         biz_unit = str(row['Business Unit']).lower()
@@ -223,9 +235,9 @@ if uploaded_jobs and uploaded_invoices and uploaded_timesheets:
         if tech in ['Erik Tange', 'Bryan Pickett']:
             calculated_payout = lookup_matrix_rate(row, tech, revenue, erik_matrix_df, bryan_matrix_df, mode="labor")
             labor_cost = calculated_payout if calculated_payout is not None else (revenue * 0.34)
-        elif 'hourly' in biz_unit or 'staff_hourly' in tech.lower():
+        elif 'hourly' in biz_unit or any(n in tech.lower() for n in ['matt', 'tanner', 'edward']):
             labor_cost = float(row.get('Hours Worked', 0.0)) * 25.0  
-        elif 'salary' in biz_unit or 'staff_salaried' in tech.lower():
+        elif 'salary' in biz_unit or any(n in tech.lower() for n in ['sean', 'mathew']):
             weekly_salary_burden = 1200.00 
             total_jobs_by_tech = len(df_jobs[df_jobs['Technician'] == tech])
             labor_cost = (weekly_salary_burden * detected_weeks) / max(1, total_jobs_by_tech)
@@ -282,8 +294,7 @@ if uploaded_jobs and uploaded_invoices and uploaded_timesheets:
                 audit_records.append({
                     'Job ID': row['Job ID'],
                     'Technician': tech,
-                    'Job Title': row.get('Title', ''),
-                    'Subtitle/Notes': row.get(next((c for c in row.index if 'subtitle' in str(c).lower() or 'description' in str(c).lower()), row.index[0]), ''),
+                    'Job Title': row['Title'],
                     'Billed Amount': actual_inv,
                     'Matrix Expected Amount': expected_inv,
                     'Invoice Variance': variance
@@ -302,12 +313,12 @@ if uploaded_jobs and uploaded_invoices and uploaded_timesheets:
         st.markdown("Cross-references recorded timesheet clock hours against dynamic ticket status timestamps to track operational leakage.")
         
         df_slippage = df_timesheets.copy()
-        clock_col = next((c for c in df_slippage.columns if 'clock' in c.lower() or 'total hours' in c.lower()), None)
-        wrench_col = next((c for c in df_slippage.columns if 'wrench' in c.lower() or 'job hours' in c.lower() or 'actual hours' in c.lower()), None)
+        clock_col = next((c for c in df_slippage.columns if 'clock' in c.lower() or 'total' in c.lower()), None)
+        wrench_col = next((c for c in df_slippage.columns if 'wrench' in c.lower() or 'job' in c.lower() or 'actual' in c.lower() or 'log' in c.lower()), None)
         
         if clock_col and wrench_col:
-            df_slippage['Clock Hours'] = pd.to_numeric(df_slippage[clock_col], errors='coerce').fillna(0.0)
-            df_slippage['Wrench Hours'] = pd.to_numeric(df_slippage[wrench_col], errors='coerce').fillna(0.0)
+            df_slippage['Clock Hours'] = sanitize_currency_series(df_slippage[clock_col])
+            df_slippage['Wrench Hours'] = sanitize_currency_series(df_slippage[wrench_col])
             df_slippage['Slippage (Hours)'] = df_slippage['Clock Hours'] - df_slippage['Wrench Hours']
             df_slippage['Unproductive Payroll Exposure'] = df_slippage['Slippage (Hours)'] * 25.00
             
@@ -315,7 +326,7 @@ if uploaded_jobs and uploaded_invoices and uploaded_timesheets:
                 'Clock Hours': '{:.2f} hrs', 'Wrench Hours': '{:.2f} hrs', 'Slippage (Hours)': '{:.2f} hrs', 'Unproductive Payroll Exposure': '${:,.2f}'
             }))
         else:
-            st.warning("Ensure your loaded `timesheets.csv` file contains clear columns mapping to clock hours and wrench time hours to isolate payroll exposure metrics.")
+            st.warning("Ensure your loaded `timesheets.csv` file contains clear columns mapping to clock hours and wrench time hours.")
             st.dataframe(df_timesheets)
 
     # TAB 4: LOWE'S RECONCILIATION
@@ -324,7 +335,6 @@ if uploaded_jobs and uploaded_invoices and uploaded_timesheets:
         st.markdown("Isolates standard Water Heater streams subject to institutional cuts while strictly excluding **LA, PA, and RA** exceptions.")
         
         reconciliation_records = []
-        # Attempt to scan for pre-deducted data to flag variances, otherwise generate expected value
         applied_cut_col = next((c for c in df_jobs.columns if 'deducted' in c.lower() or 'lowes cut' in c.lower() or 'retainage' in c.lower()), None)
         
         for idx, row in df_jobs.iterrows():
