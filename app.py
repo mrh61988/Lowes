@@ -222,47 +222,81 @@ if raw_jobs_df is not None and invoices_df is not None:
             
             st.write("---")
             
-            # ---------------------------------------------------------
-            # CONTRACTOR PROFIT/LOSS AUDIT (FIXED TO ELIMINATE MATPLOTLIB)
-            # ---------------------------------------------------------
-            st.subheader("🏗️ Contractor Profit & Loss Audit (Job-by-Job)")
-            st.write("This log tracks contractor tickets to isolate unlucrative operations (e.g., Simple Installs yielding $0 net business margin).")
-            
+            # Helper color rule using raw CSS styles (Safe across different Pandas versions)
+            def color_profit_loss(val):
+                if val < 0:
+                    return 'background-color: #f8d7da; color: #721c24;'  # Soft red alert for losses
+                elif val == 0:
+                    return 'background-color: #fff3cd; color: #856404;'  # Soft yellow alert for break-evens
+                else:
+                    return 'background-color: #d4edda; color: #155724;'  # Soft green alert for profit margins
+
+            # Shared filter logic for contractors
             contractor_keywords = ['contractor', 'contactor', 'llc', 'ken', 'barber', 'wrench', 'wrentch', 'presidio', 'indian']
             is_contractor_mask = completed_jobs['Assigned Team Members'].astype(str).str.lower().apply(
                 lambda x: any(k in x for k in contractor_keywords)
             )
             contractor_df = completed_jobs[is_contractor_mask].copy()
             
+            # ---------------------------------------------------------
+            # ADDED TABLE: CONTRACTOR AGGREGATE PERFORMANCE SUMMARY
+            # ---------------------------------------------------------
+            st.subheader("🏢 Contractor Aggregate Performance Summary")
+            st.write("Summarizes total revenue, material overhead, payouts, and net business profit/loss aggregated by contractor entity. Sorted from most unlucrative to most profitable.")
+            
+            if not contractor_df.empty:
+                contractor_summary = contractor_df.groupby('Assigned Team Members').agg(
+                    Total_Jobs=('Status', 'count'),
+                    Total_Revenue=('Total Invoice Amount', 'sum'),
+                    Total_Materials=('Material Cost', 'sum'),
+                    Total_Payout=('Labor Cost', 'sum'),
+                    Total_Net_Profit=('Net Gross Profit', 'sum')
+                ).reset_index().sort_values(by='Total_Net_Profit', ascending=True) # Ascending highlights losses first
+                
+                contractor_summary.columns = ['Contractor Name', 'Total Jobs Done', 'Total Revenue', 'Total Material Overhead', 'Total Payouts', 'Total Net Profit / Loss']
+                
+                styler_summary = contractor_summary.style.format({
+                    'Total Revenue': '${:,.2f}',
+                    'Total Material Overhead': '${:,.2f}',
+                    'Total Payouts': '${:,.2f}',
+                    'Total Net Profit / Loss': '${:,.2f}'
+                })
+                
+                if hasattr(styler_summary, 'map'):
+                    styler_summary = styler_summary.map(color_profit_loss, subset=['Total Net Profit / Loss'])
+                else:
+                    styler_summary = styler_summary.applymap(color_profit_loss, subset=['Total Net Profit / Loss'])
+                    
+                st.dataframe(styler_summary, use_container_width=True, hide_index=True)
+            else:
+                st.info("No contractor metrics found to aggregate.")
+                
+            st.write("---")
+            
+            # ---------------------------------------------------------
+            # CONTRACTOR PROFIT/LOSS AUDIT (JOB-BY-JOB)
+            # ---------------------------------------------------------
+            st.subheader("🏗️ Contractor Profit & Loss Audit (Job-by-Job Detail)")
+            st.write("This log tracks individual contractor tickets to isolate specific problematic invoices.")
+            
             if not contractor_df.empty:
                 contractor_audit = contractor_df[['#ID', 'Assigned Team Members', 'Business Unit', 'Total Invoice Amount', 'Material Cost', 'Labor Cost', 'Net Gross Profit']].copy()
                 contractor_audit = contractor_audit.sort_values(by='Net Gross Profit', ascending=True)
                 contractor_audit.columns = ['Job #', 'Contractor', 'Business Unit', 'Gross Revenue', 'Material Cost', 'Contractor Payout', 'Net Profit / Loss']
                 
-                # Custom light-weight color rules using raw CSS styles
-                def color_profit_loss(val):
-                    if val < 0:
-                        return 'background-color: #f8d7da; color: #721c24;'  # Soft red alert for losses
-                    elif val == 0:
-                        return 'background-color: #fff3cd; color: #856404;'  # Soft yellow alert for break-evens
-                    else:
-                        return 'background-color: #d4edda; color: #155724;'  # Soft green alert for profit margins
-                
-                # Base string formatting 
-                styler = contractor_audit.style.format({
+                styler_audit = contractor_audit.style.format({
                     'Gross Revenue': '${:,.2f}',
                     'Material Cost': '${:,.2f}',
                     'Contractor Payout': '${:,.2f}',
                     'Net Profit / Loss': '${:,.2f}'
                 })
                 
-                # Safely execute styling without causing cross-version environment friction
-                if hasattr(styler, 'map'):
-                    styler = styler.map(color_profit_loss, subset=['Net Profit / Loss'])
+                if hasattr(styler_audit, 'map'):
+                    styler_audit = styler_audit.map(color_profit_loss, subset=['Net Profit / Loss'])
                 else:
-                    styler = styler.applymap(color_profit_loss, subset=['Net Profit / Loss'])
+                    styler_audit = styler_audit.applymap(color_profit_loss, subset=['Net Profit / Loss'])
                 
-                st.dataframe(styler, use_container_width=True, hide_index=True)
+                st.dataframe(styler_audit, use_container_width=True, hide_index=True)
             else:
                 st.info("No contractor assignments matched in the currently uploaded data range.")
                 
