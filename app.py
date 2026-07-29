@@ -141,6 +141,22 @@ def calculate_job_material_cost(row):
         return base_mat
 
 # ---------------------------------------------------------
+# EXEMPTION DETECTION HELPER
+# ---------------------------------------------------------
+def check_is_exemption(row):
+    """Flags if a water heater job falls under LA, PA, or RA specialized streams."""
+    title = str(row['Title']).upper()
+    tags = [t.strip().upper() for t in str(row['Tags']).split(',')] if pd.notna(row['Tags']) else []
+    ex_keys = ['LA', 'PA', 'RA']
+    
+    if any(k in tags for k in ex_keys):
+        return True
+    for k in ex_keys:
+        if f" {k} " in f" {title} " or title.startswith(f"{k} ") or f" {k}:" in title:
+            return True
+    return False
+
+# ---------------------------------------------------------
 # 1. SIDEBAR FILE UPLOADS
 # ---------------------------------------------------------
 st.sidebar.header("📁 Upload Operational Data")
@@ -185,7 +201,7 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
         jobs_df['Assigned Team Members'] = jobs_df['Assigned Team Members'].astype(str).str.split(',').str[0].str.strip()
         jobs_df['Assigned Team Members'] = jobs_df['Assigned Team Members'].replace(['nan', 'None', ''], None)
 
-    numeric_cols_jobs = ['Total Invoice Amount', 'Job Duration Decimal', 'Travel Duration Decimal', 
+    numeric_cols_jobs = ['Total Invoice Amount', 'Total Estimate Amount', 'Job Duration Decimal', 'Travel Duration Decimal', 
                          'Invoice - Total Product Cost', 'Invoice - Total Service Cost']
     for col in numeric_cols_jobs:
         if col in jobs_df.columns:
@@ -212,6 +228,8 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
 
     jobs_df['Labor Cost'] = jobs_df.apply(calculate_job_labor_cost, axis=1)
     jobs_df['Material Cost'] = jobs_df.apply(calculate_job_material_cost, axis=1)
+    
+    # Calculate initial job level Net Profit using base job labor rules
     jobs_df['Net Gross Profit'] = jobs_df['Total Invoice Amount'] - jobs_df['Material Cost'] - jobs_df['Labor Cost']
 
     tab1, tab2, tab3 = st.tabs(["Technician & Job Metrics", "Financial & Labor ROI", "Geographic Performance"])
@@ -255,7 +273,7 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
             
             st.write("---")
             
-            # AGGREGATE AUDITING LOG (SORTED BY HIGHEST PAYROLL SLIPPAGE)
+            # AGGREGATE AUDITING LOG (SORTED BY PAYROLL SLIPPAGE)
             st.subheader("⏰ Clock Hours vs. Ticket Hours Auditing Log (Aggregate Summary)")
             st.write("Exposes team leaks by contrasting total clocked hours against active job tracking. **Sorted by highest financial payroll slippage**.")
             
@@ -280,7 +298,6 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
                     'Hourly Payroll Slippage': waste_cost if is_hourly else np.nan
                 })
                 
-            # Modified sorting logic: sorts from largest cash leak down to $0.00, pushing NaNs cleanly to bottom
             utilization_df = pd.DataFrame(utilization_records).sort_values(by='Hourly Payroll Slippage', ascending=False, na_position='last')
             
             st.dataframe(utilization_df.style.format({
@@ -355,6 +372,8 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
                 return row['Total_Labor_Cost_Jobs']
             
             fin_metrics['Labor Cost Burden'] = fin_metrics.apply(determine_true_labor, axis=1)
+            
+            # Recompute accurate final net margins based on scaled salary overhead blocks
             fin_metrics['Net Gross Profit'] = fin_metrics['Total_Revenue'] - fin_metrics['Total_Material_Cost'] - fin_metrics['Labor Cost Burden']
             
             revenue_minus_materials = fin_metrics['Total_Revenue'] - fin_metrics['Total_Material_Cost']
@@ -369,6 +388,69 @@ if raw_jobs_df is not None and invoices_df is not None and timesheets_df is not 
                 'Gross Revenue': '${:,.2f}', 'Material Costs': '${:,.2f}', 'Labor Cost Burden': '${:,.2f}',
                 'Net Gross Profit': '${:,.2f}', 'Labor % of (Rev - Mats)': '{:.1f}%'
             }), use_container_width=True, hide_index=True)
+            
+            # ---------------------------------------------------------
+            # NEW ADDITION: EXEMPTION STREAM SEGMENTER & CONTRACT VARIANCE AUDITS
+            # ---------------------------------------------------------
+            st.write("---")
+            st.subheader("🛠️ Lowe's Contract Protections & Revenue Audits")
+            
+            col_seg, col_aud = st.columns([4, 5])
+            
+            with col_seg:
+                st.markdown("#### 🔀 Exemption Stream Segmenter (Water Heaters)")
+                st.caption("Splits completed Water Heater tickets into Standard Retail (subject to Lowe's 15% cut) vs Program Exceptions (LA/PA/RA).")
+                
+                wh_jobs = completed_jobs[completed_jobs['Business Unit'].str.contains('Water Heaters', case=False, na=False)].copy()
+                
+                if not wh_jobs.empty:
+                    wh_jobs['Is Exemption'] = wh_jobs.apply(check_is_exemption, axis=1)
+                    wh_jobs['Stream Type'] = np.where(wh_jobs['Is Exemption'], "Program Exemption (LA/PA/RA)", "Standard Retail")
+                    
+                    # Compute granular team cost burdens for the segmentations
+                    wh_stream_summary = wh_jobs.groupby('Stream Type').agg(
+                        Total_Jobs=('Status', 'count'),
+                        Gross_Revenue=('Total Invoice Amount', 'sum'),
+                        Material_Costs=('Material Cost', 'sum'),
+                        Labor_Costs=('Labor Cost', 'sum')
+                    ).reset_index()
+                    
+                    wh_stream_summary['Net Profit'] = wh_stream_summary['Gross Revenue'] - wh_stream_summary['Material_Costs'] - wh_stream_summary['Labor_Costs']
+                    wh_stream_summary['Avg Profit / Job'] = wh_stream_summary['Net Profit'] / wh_stream_summary['Total_Jobs']
+                    
+                    wh_stream_summary.columns = ['Revenue Stream', 'Jobs Done', 'Gross Revenue', 'Material Overhead', 'Labor Overhead', 'Net Profit', 'Avg Margin / Job']
+                    st.dataframe(wh_stream_summary.style.format({
+                        'Gross Revenue': '${:,.2f}', 'Material Overhead': '${:,.2f}', 'Labor Overhead': '${:,.2f}',
+                        'Net Profit': '${:,.2f}', 'Avg Margin / Job': '${:,.2f}'
+                    }), use_container_width=True, hide_index=True)
+                else:
+                    st.info("No completed water heater tickets found within this file upload range.")
+                    
+            with col_aud:
+                st.markdown("#### ⚠️ Lowe's 15% Margin Cut Reconciliation Audit")
+                st.caption("Flags standard retail water heater installations where the final processed invoice deviates from the required contract value (85% of original estimate).")
+                
+                if not wh_jobs.empty:
+                    # Filter down strictly to standard jobs where quotes and final values exist
+                    wh_standard = wh_jobs[(wh_jobs['Total Estimate Amount'] > 0) & (wh_jobs['Total Invoice Amount'] > 0) & (~wh_jobs['Is Exemption'])].copy()
+                    
+                    wh_standard['Expected Invoice'] = wh_standard['Total Estimate Amount'] * 0.85
+                    wh_standard['Contract Variance'] = wh_standard['Total Invoice Amount'] - wh_standard['Expected Invoice']
+                    
+                    # Flag anomalies where variance exceeds a $1 tolerance envelope
+                    wh_anomalies = wh_standard[wh_standard['Contract Variance'].abs() > 1.00].copy()
+                    
+                    if not wh_anomalies.empty:
+                        wh_anomalies_display = wh_anomalies[['#ID', 'Assigned Team Members', 'Total Estimate Amount', 'Total Invoice Amount', 'Contract Variance']].sort_values(by='Contract Variance', ascending=True)
+                        wh_anomalies_display.columns = ['Job #', 'Primary Tech', 'Original Estimate', 'Lowe\'s Paid Invoice', 'Fee Discrepancy']
+                        
+                        st.dataframe(wh_anomalies_display.style.format({
+                            'Original Estimate': '${:,.2f}', 'Lowe\'s Paid Invoice': '${:,.2f}', 'Fee Discrepancy': '${:,.2f}'
+                        }), use_container_width=True, hide_index=True)
+                    else:
+                        st.success("100% Retainage Compliance: All standard retail water heater remittances align with the 15% discount contract threshold.")
+                else:
+                    st.info("No compliance data available for standard retail configurations.")
             
             st.write("---")
             
