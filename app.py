@@ -21,7 +21,7 @@ def format_hours_mins(decimal_hours):
     return f"{hours}:{minutes:02d}"
 
 # ---------------------------------------------------------
-# LABOUR COST CALCULATION ENGINE (WITH CONTRACTOR LOGIC)
+# LABOUR COST CALCULATION ENGINE
 # ---------------------------------------------------------
 def calculate_job_labor_cost(row):
     tech = str(row['Assigned Team Members'])
@@ -29,47 +29,62 @@ def calculate_job_labor_cost(row):
     revenue = row['Total Invoice Amount']
     bu = str(row['Business Unit'])
     
-    # Handle missing or invalid inputs gracefully
     if pd.isna(duration): duration = 0.0
     if pd.isna(revenue): revenue = 0.0
     
-    # --- 1. INTERNAL SALARIED EMPLOYEES ---
+    # Internal Salaried Staff
     if tech == 'Sean Marble':
         return duration * (70000 / 2080)
     elif tech == 'Mathew Hodges':
         return duration * (65000 / 2080)
         
-    # --- 2. INTERNAL HOURLY EMPLOYEES ($25/hr) ---
+    # Internal Hourly Staff ($25/hr)
     elif tech in ['Matt Schlosser', 'Tanner LaForge', 'Edward Lopez']:
         return duration * 25.00
         
-    # --- 3. INTERNAL COMMISSION EMPLOYEES (34% of Revenue) ---
+    # Internal Commission Staff (34% of Revenue)
     elif tech in ['Erik Tange', 'Bryan Pickett']:
         return revenue * 0.34
         
-    # --- 4. EXTERNAL CONTRACTORS ENGINE ---
+    # External Contractors Engine
     else:
-        # Detect if worker is a contractor via common name keywords
         is_contractor = any(k in tech.lower() for k in ['contractor', 'contactor', 'llc', 'ken', 'barber', 'wrench', 'wrentch', 'presidio', 'indian'])
-        
         if is_contractor:
-            # Rule A: Simple Install jobs pay out total invoice revenue
             if 'simple installs' in bu.lower():
                 return revenue
-            
-            # Rule B: Water Heater jobs pay specified fixed flat rates
             elif 'water heaters' in bu.lower():
-                if 'ken' in tech.lower():
-                    return 300.00
-                elif 'barber' in tech.lower():
-                    return 600.00
-                elif 'wrench' in tech.lower() or 'wrentch' in tech.lower():
-                    return 1800.00
-                elif 'indian' in tech.lower() or 'presidio' in tech.lower():
-                    return 600.00
-        
-        # Default fallback for unconfigured accounts
+                if 'ken' in tech.lower(): return 300.00
+                elif 'barber' in tech.lower(): return 600.00
+                elif 'wrench' in tech.lower() or 'wrentch' in tech.lower(): return 1800.00
+                elif 'indian' in tech.lower() or 'presidio' in tech.lower(): return 600.00
         return 0.0
+
+# ---------------------------------------------------------
+# MATERIAL COST CALCULATION ENGINE (NEW CONTRACTOR RULES)
+# ---------------------------------------------------------
+def calculate_job_material_cost(row):
+    tech = str(row['Assigned Team Members']).lower()
+    bu = str(row['Business Unit']).lower()
+    
+    # Base material cost calculation from fields
+    base_mat = row['Invoice - Total Product Cost'] + row['Invoice - Total Service Cost']
+    
+    # Detect Contractor Status
+    is_contractor = any(k in tech for k in ['contractor', 'contactor', 'llc', 'ken', 'barber', 'wrench', 'wrentch', 'presidio', 'indian'])
+    
+    if is_contractor:
+        # Rule 1: No materials costs for contractors on Simple Installs
+        if 'simple installs' in bu:
+            return 0.00
+        # Rule 2: Hardcoded $650 material override for contractors on Water Heaters
+        elif 'water heaters' in bu:
+            return 650.00
+        return base_mat
+    else:
+        # Internal crews rules: Deduct $125 built-in labor cushion from Water Heater jobs
+        if 'water heaters' in bu:
+            return max(0.00, base_mat - 125.00)
+        return base_mat
 
 # ---------------------------------------------------------
 # 1. SIDEBAR FILE UPLOADS
@@ -80,41 +95,37 @@ st.sidebar.write("Upload your CSV exports below to populate the data tables.")
 uploaded_jobs = st.sidebar.file_uploader("Upload 'jobs full data.csv'", type=["csv"])
 uploaded_invoices = st.sidebar.file_uploader("Upload 'invoices.csv'", type=["csv"])
 
-# Helper function to process the files once uploaded
 def process_uploaded_file(file):
     if file is not None:
         df_raw = pd.read_csv(file)
-        # Fix headers (since row 0 contains the actual column names in these reports)
         df = df_raw.copy()
         df.columns = df.iloc[0]
         df = df[1:].reset_index(drop=True)
         return df
     return None
 
-# Process data if files are provided
 raw_jobs_df = process_uploaded_file(uploaded_jobs)
 invoices_df = process_uploaded_file(uploaded_invoices)
 
 # ---------------------------------------------------------
-# 2. DASHBOARD LOGIC (Runs only when data is uploaded)
+# 2. DASHBOARD LOGIC
 # ---------------------------------------------------------
 if raw_jobs_df is not None and invoices_df is not None:
     
-    # --- STAGE 1: FILTER BY BUSINESS UNIT ---
+    # Filter Business Units
     if 'Business Unit' in raw_jobs_df.columns:
         jobs_df = raw_jobs_df[
             raw_jobs_df['Business Unit'].str.contains('Water Heaters|Simple Installs', case=False, na=False)
         ].copy()
     else:
         jobs_df = raw_jobs_df.copy()
-        st.sidebar.warning("Warning: 'Business Unit' column not found. Showing all jobs.")
 
-    # --- STAGE 2: ATTRIBUTE MULTI-TECH JOBS TO FIRST NAMED TECH ---
+    # Multi-Tech Primary Attribution
     if 'Assigned Team Members' in jobs_df.columns:
         jobs_df['Assigned Team Members'] = jobs_df['Assigned Team Members'].astype(str).str.split(',').str[0].str.strip()
         jobs_df['Assigned Team Members'] = jobs_df['Assigned Team Members'].replace(['nan', 'None', ''], None)
 
-    # --- Clean numeric & date columns for Jobs ---
+    # Clean numeric fields
     numeric_cols_jobs = ['Total Invoice Amount', 'Job Duration Decimal', 'Travel Duration Decimal', 
                          'Invoice - Total Product Cost', 'Invoice - Total Service Cost']
     for col in numeric_cols_jobs:
@@ -124,26 +135,15 @@ if raw_jobs_df is not None and invoices_df is not None:
     if 'Start Date' in jobs_df.columns:
         jobs_df['Start Date'] = pd.to_datetime(jobs_df['Start Date'], errors='coerce')
 
-    # --- Clean numeric columns for Invoices ---
     if 'Profit Margin' in invoices_df.columns:
         invoices_df['Profit Margin'] = pd.to_numeric(invoices_df['Profit Margin'], errors='coerce').fillna(0.0)
 
-    # --- STAGE 3: APPLY PAY STRUCTURE & MATERIAL CALCULATIONS ---
+    # Apply Engines
     jobs_df['Labor Cost'] = jobs_df.apply(calculate_job_labor_cost, axis=1)
-    
-    # Base material cost calculation
-    jobs_df['Material Cost'] = jobs_df['Invoice - Total Product Cost'] + jobs_df['Invoice - Total Service Cost']
-    
-    # Adjustment: Deduct $125 built-in labor cushion for all Water Heater business unit jobs
-    if 'Business Unit' in jobs_df.columns:
-        is_water_heater = jobs_df['Business Unit'].str.contains('Water Heaters', case=False, na=False)
-        jobs_df.loc[is_water_heater, 'Material Cost'] = jobs_df.loc[is_water_heater, 'Material Cost'] - 125.00
-        jobs_df['Material Cost'] = jobs_df['Material Cost'].clip(lower=0.0)
-
-    # Recalculate true net gross profit based on adjusted materials
+    jobs_df['Material Cost'] = jobs_df.apply(calculate_job_material_cost, axis=1)
     jobs_df['Net Gross Profit'] = jobs_df['Total Invoice Amount'] - jobs_df['Material Cost'] - jobs_df['Labor Cost']
 
-    # Create tabs for the different modules
+    # Initialize Interface Tabs
     tab1, tab2, tab3 = st.tabs(["Technician & Job Metrics", "Financial & Labor ROI", "Geographic Performance"])
 
     # ---------------------------------------------------------
@@ -186,14 +186,13 @@ if raw_jobs_df is not None and invoices_df is not None:
             st.warning("No 'Completed' status jobs found.")
 
     # ---------------------------------------------------------
-    # TAB 2: Financial & Labor ROI Metrics (Updated Calculation)
+    # TAB 2: Financial & Labor ROI Metrics
     # ---------------------------------------------------------
     with tab2:
         st.header("Financial Performance & Labor Cost Analysis")
-        st.write("This table tracks internal payroll burden and contractor invoice payouts compared against net operational profit metrics.")
+        st.write("Tracks labor cost adjustments and vendor margins compared against operational profit pools.")
         
         if not completed_jobs.empty:
-            # Group financial metrics
             fin_metrics = completed_jobs.groupby('Assigned Team Members').agg(
                 Jobs_Completed=('Status', 'count'),
                 Total_Revenue=('Total Invoice Amount', 'sum'),
@@ -202,11 +201,9 @@ if raw_jobs_df is not None and invoices_df is not None:
                 Total_Net_Profit=('Net Gross Profit', 'sum')
             ).reset_index().sort_values('Total_Net_Profit', ascending=False)
             
-            # Metric Change: Calculate Labor Cost / (Revenue - Materials)
+            # Recalculated Metric: Labor Cost / (Revenue - Materials)
             revenue_minus_materials = fin_metrics['Total_Revenue'] - fin_metrics['Total_Material_Cost']
             fin_metrics['Labor % of Rev Less Mats'] = (fin_metrics['Total_Labor_Cost'] / revenue_minus_materials) * 100
-            
-            # Safety: Clean infinite values/NaN states from potential division by zero
             fin_metrics['Labor % of Rev Less Mats'] = fin_metrics['Labor % of Rev Less Mats'].replace([np.inf, -np.inf], np.nan).fillna(0.0)
             
             fin_metrics.columns = ['Name', 'Jobs Done', 'Gross Revenue', 'Material Costs', 'Labor Cost Burden', 'Net Gross Profit', 'Labor % of (Rev - Mats)']
